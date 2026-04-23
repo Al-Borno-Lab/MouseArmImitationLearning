@@ -13,16 +13,20 @@ The DRL used here is StableBaselines, and when training is completed, agents are
 This project was created and tested on linux (specifically ubuntu), and while it might work on other systems, is not guarenteed. 
 
 ### Examples
-<div style="display: flex; flex-wrap: wrap; justify-content: center; gap: 10px;">
-  <div style="flex: 1 1 300px; text-align: center;">
-    <img src="./readme/torque_agent_sample.gif" style="width: 100%; height: auto;">
-    <b>Torque Driven Solution</b>
-  </div>
-  <div style="flex: 1 1 300px; text-align: center;">
-    <img src="./readme/muscle_agent_sample.gif" style="width: 100%; height: auto;">
-    <b>Muscle Driven Solution</b>
-  </div>
-</div>
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="./readme/torque_agent_sample.gif" alt="Torque demo" width="100%">
+      <br>
+      <b>Torque Driven Solution</b>
+    </td>
+    <td align="center" width="50%">
+      <img src="./readme/muscle_agent_sample.gif" alt="Muscle demo" width="100%">
+      <br>
+      <b>Muscle Driven Solution</b>
+    </td>
+  </tr>
+</table>
 
 ---
 
