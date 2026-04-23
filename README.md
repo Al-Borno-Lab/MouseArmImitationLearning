@@ -131,7 +131,7 @@ This section details which parameters can be tuned from the imitation learning e
 
 2. Visualize Training Results with Tensorboard
     ~~~
-    PORT=$(shuf -i 6006-9000 -n 1); tensorboard --logdir ./logs --port $PORT & sleep 2 && xdg-open http://localhost:$PORT
+    PORT=$(shuf -i 6006-9000 -n 1); tensorboard --logdir ./agents --port $PORT & sleep 2 && xdg-open http://localhost:$PORT
     ~~~
 
 3. Test a Model's Performance in a Live Viewer
