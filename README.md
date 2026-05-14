@@ -6,27 +6,27 @@
 - **Lab:** http://cse.ucdenver.edu/~alborno/
 
 ### Description
-This is an imitation learning project which uses reinforcmenent learning to train deep neural networks to control biomechanical and torque driven models by minimizing the difference between a desired kinematic motion and the actual motion enacted by a network. In this implementation of imitation learning, the network takes, as input, the joint angles and velocities, and outputs the muscle activations or torque activations respectively; there is no kinematic information given to the network, and each network learns a single unique motion.
+This is an imitation learning project which uses reinforcmenent learning to train deep neural networks to control biomechanical and torque driven models by minimizing the difference between a desired kinematic motion and the actual motion enacted by a network. In this implementation of imitation learning, the network takes, as input, the joint angles and velocities, and outputs the muscle activations or torque activations respectively where each network learns a single unique motion. 
 
-The DRL used here is StableBaselines, and when training is completed, agents are saved in the ./agents/ folder and contain the following: training logs, the config file used when the model was created, and a zip managed by StableBaselines. Currently the only supported model architecture is a shared LSTM backbone, split off into dense layered reward and action heads.
+In addition, there is a variation of the environment that can be setup to train a generalized kinematic model which can perform the motion of any desired kinematics on the fly by training on a large number of unique kinematics. It does this by adding a vector to the observation space with values that are the difference between the current position and a set number of future kineamtic positions (see path_steps under the config parameters to enable this functionality).
+
+The mouse forelimb physics models have been adapted from the biomechanical mouse forelimb model from Gilmer et al. [1]; originally an OpenSim model, the torque and muscle models available here are implemented and simulated in MuJoCo [2]. The DRL libray used here is StableBaselines3 [3] which offers a varity of reliable learning algorithms; however, the main algorithm in use here is PPO [4].
+
+When training is completed, agents are saved in the ./agents/ folder and contain the following: training logs, the config file used when the model was created, and a zip managed by StableBaselines. Currently the only supported model architecture is a shared LSTM [5] backbone, split off into dense layered reward and action heads.
 
 This project was created and tested on linux (specifically ubuntu), and while it might work on other systems, is not guarenteed. 
 
 ### Examples
-<table>
-  <tr>
-    <td align="center" width="50%">
-      <img src="./readme/torque_agent_sample.gif" alt="Torque demo" width="100%">
-      <br>
-      <b>Torque Driven Solution</b>
-    </td>
-    <td align="center" width="50%">
-      <img src="./readme/muscle_agent_sample.gif" alt="Muscle demo" width="100%">
-      <br>
-      <b>Muscle Driven Solution</b>
-    </td>
-  </tr>
-</table>
+<div style="display: flex; flex-wrap: wrap; justify-content: center; gap: 10px;">
+  <div style="flex: 1 1 300px; text-align: center;">
+    <img src="./readme/torque_agent_sample.gif" style="width: 100%; height: auto;">
+    <b>Torque Driven Solution</b>
+  </div>
+  <div style="flex: 1 1 300px; text-align: center;">
+    <img src="./readme/muscle_agent_sample.gif" style="width: 100%; height: auto;">
+    <b>Muscle Driven Solution</b>
+  </div>
+</div>
 
 ---
 
@@ -50,7 +50,7 @@ This project was created and tested on linux (specifically ubuntu), and while it
 
 2. Clone Repo from Github and Open
     ~~~
-    git clone git clone https://github.com/Al-Borno-Lab/MouseArmImitationLearning.git
+    git clone https://github.com/Al-Borno-Lab/MouseArmImitationLearning.git
     cd MouseArmImitationLearning
     ~~~
 
@@ -66,21 +66,24 @@ This project was created and tested on linux (specifically ubuntu), and while it
     ~~~
 
 ### Huggingface Installations
-1. Download Huggingface Hub (if not done so already)
+1. Install Huggingface Hub (if not done so already)
     ~~~
     pip install -U huggingface_hub
     ~~~
 
-2. Download Mujoco Model and Kinematic Data
+2. Download Mujoco Model
     ~~~
     hf download AlBornoLab/MouseArmModel --repo-type dataset --local-dir ./models
-    hf download AlBornoLab/MouseArmKinematics --repo-type dataset --local-dir ./data
     ~~~
 
-3. (OPTIONAL) Download Pre-Trained Torque and Muscle Models
+3. (OPTIONAL) Download Dataset: MouseArmKinematics 
     ~~~
-    hf download AlBornoLab/MouseArmSampleMuscleAgent --repo-type model --local-dir ./agents/muscle_model
-    hf download AlBornoLab/MouseArmSampleTorqueAgent --repo-type model --local-dir ./agents/torque_model
+    hf download AlBornoLab/MouseArmKinematics --repo-type dataset --local-dir ./MouseArmKinematics
+    ~~~
+
+4. (OPTIONAL, REQUIRES AUTH) Download Dataset: Welle 
+    ~~~
+    hf download AlBornoLab/Welle --repo-type dataset --local-dir ./Welle
     ~~~
 
 ---
@@ -94,12 +97,16 @@ This section details which parameters can be tuned from the imitation learning e
 
 2. Environment
     - **model**: Mujoco model file to use
-    - **kinematics**: Kinematic data file to use
+    - **kinematics**: Kinematic data to use (can be a file for single kinematics, or a folder containing files for generalized kinematics)
+    - **train_ratio**: The trainig ratio used in splitting the kineamtic data (only matters for generalized kineamtics)
+    - **seed**: Random seed used when shuffling and splitting the kinmatic data (only matters for generalized kinematics)
+    - **path_steps**: The number of future timesteps to sample kinematics from and include in the observation (0 for single kinematics, >1 for generalized kinematics)
     - **w_bone_diff**: A weight on the average difference between tracked bone locations in the reward function
     - **w_elbow**: A weight on the elbow in the bone average difference
     - **w_paw**: A weight on the paw in the bone average difference
     - **w_effort**: A weight on the effort used by all actuaturos in the reward function
-    - **w_jitter**: A weight on the difference between qvel on the joints in the reward function
+    - **w_qvel**: A weight on the difference between qvel on the joints in the reward function
+    - **w_qpos**: A weight on the difference between qpos on the joints in the reward function
     - **w_action:** A weight on the difference between action outputs in the reward function
     - **control_dt**: Total simulation time step size per environment step
     - **n_substeps**: Simulation substeps per environment step (increasing improves simulation stability)
@@ -117,11 +124,12 @@ This section details which parameters can be tuned from the imitation learning e
     - **n_epochs**: Training epochs per iteration
 
 5. Training
-    - **timesteps**: total timesteps across all training  
-    - **num_envs**: number of environments running in parallel
+    - **timesteps**: Total timesteps across all training  
+    - **num_envs**: Number of environments running in parallel
+    - **eval_freq**: Timesteps between evaluations
 
 6. Testing
-    - **slowmo**: sleep time between frames (visually only), increase for greater slowmo effect
+    - **slowmo**: Sleep time between frames (visual only), increase for greater slowmo effect
 
 ### Running the Programs
 1. Train a Model
@@ -131,7 +139,7 @@ This section details which parameters can be tuned from the imitation learning e
 
 2. Visualize Training Results with Tensorboard
     ~~~
-    PORT=$(shuf -i 6006-9000 -n 1); tensorboard --logdir ./agents --port $PORT & sleep 2 && xdg-open http://localhost:$PORT
+    PORT=$(shuf -i 6006-9000 -n 1); tensorboard --logdir ./logs --port $PORT & sleep 2 && xdg-open http://localhost:$PORT
     ~~~
 
 3. Test a Model's Performance in a Live Viewer
@@ -143,6 +151,14 @@ This section details which parameters can be tuned from the imitation learning e
 
 # References
 
->Gilmer, Jesse I., Susan K. Coltman, Geraldine Cuenu, John R. Hutchinson, Daniel Huber, Abigail L. Person, and Mazen Al Borno. "A novel biomechanical model of the proximal mouse forelimb predicts muscle activity in optimal control simulations of reaching movements." Journal of neurophysiology 133, no. 4 (2025): 1266-1278.
+> [1] Gilmer, Jesse I., Susan K. Coltman, Geraldine Cuenu, John R. Hutchinson, Daniel Huber, Abigail L. Person, and Mazen Al Borno. "A novel biomechanical model of the proximal mouse forelimb predicts muscle activity in optimal control simulations of reaching movements." Journal of neurophysiology 133, no. 4 (2025): 1266-1278.
+
+> [2] Todorov, Emanuel, Tom Erez, and Yuval Tassa. "MuJoCo: A physics engine for model-based control." *2012 IEEE/RSJ International Conference on Intelligent Robots and Systems* (2012): 5026-5033.
+
+> [3] Raffin, Antonin, Ashley Hill, Adam Gleave, Anssi Kanervisto, Maximilian Ernestus, and Noah Dormann. "Stable-Baselines3: Reliable Reinforcement Learning Implementations." *Journal of Machine Learning Research* 22, no. 268 (2021): 1-8.
+
+> [4] Schulman, John, Filip Wolski, Prafulla Dhariwal, Alec Radford, and Oleg Klimov. "Proximal Policy Optimization Algorithms." *arXiv preprint arXiv:1707.06347* (2017).
+
+> [5] Hochreiter, Sepp, and Jürgen Schmidhuber. "Long Short-Term Memory." *Neural Computation* 9, no. 8 (1997): 1735-1780.
 
 ---

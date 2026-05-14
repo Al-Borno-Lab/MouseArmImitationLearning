@@ -105,10 +105,11 @@ def mujoco_unstable(data):
 class MouseArmImitationEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 60}
 
-    def __init__(self, kinematics, model,
+    def __init__(self, kinematic_files, model,
                  render_mode: str | None = None,
                  w_bone_diff = 1.0, w_effort = 1.0, w_elbow = 1.0, w_paw = 1.0,
-                 w_jitter = 1.0, w_action = 1.0,
+                 w_qpos = 1.0, w_qvel = 1.0, w_action = 1.0,
+                 path_steps = 0,
                  muscle_color_theme = "grey_red",
                  control_dt = 0.006666666, n_substeps = 16):
         """
@@ -139,14 +140,17 @@ class MouseArmImitationEnv(gym.Env):
             low=self.model.actuator_ctrlrange[:, 0],
             high=self.model.actuator_ctrlrange[:, 1],
             shape=(self.model.nu,),
-            dtype=np.float32,
+            dtype=np.float64,
         )
-
-        # Observation = qpos + qvel (typical)
+        
+        self.path_steps = path_steps
+        num_path_points = self.path_steps * 2 * 3 # 2 for bones; 3 for x,y,z
+        
+        # Observation = qpos + qvel (typical) + path
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf,
-            shape=(self.model.nq + self.model.nv,),
-            dtype=np.float32
+            shape=(self.model.nq + self.model.nv + num_path_points,),
+            dtype=np.float64
         )
 
         # Viewer handle (human mode)
@@ -157,32 +161,26 @@ class MouseArmImitationEnv(gym.Env):
         self.radius_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "elbow_flex")
         self.geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "handm")
 
-        self.kinematic_data = np.loadtxt(
-            kinematics,
-            delimiter=","
-        )
-        self.max_steps = self.kinematic_data.shape[0]
-        self.time_col = 0
+        self.kinematic_data = None
+        self.max_steps = None
+
         self.paw_cols = slice(1, 4)
         self.elbow_cols = slice(10, 13)
         self.shoulder_cols = slice(7, 10)
 
-        angles = {
+        self.angles = {
             "elv_angle": 1.27,
             "shoulder_ext": -0.404,
             "shoulder_rot": 0.204,
             "elbow_flex": -0.011,
         }
-        self.start_qpos = make_start_qpos_from_named_hinges(self.model, self.data, angles)#self.model.qpos0.copy()          # replace later with your own
+
+        self.kinematic_scale = None
+        self.start_qpos = make_start_qpos_from_named_hinges(self.model, self.data, self.angles)#self.model.qpos0.copy()          # replace later with your own
         self.start_qvel = np.zeros(self.model.nv)          # replace later with your own
 
         # Optional: start controls (actuators), shape (model.nu,)
         self.start_ctrl = np.zeros(self.model.nu) if self.model.nu > 0 else None
-
-        # Solve frame 0 IK and replace the hard-coded start pose
-        self.kinematic_scale = None
-        self.solve_kinematic_scale()
-        self.solve_first_frame_start_qpos()
 
         self.control_dt = control_dt  # T seconds per env.step()
         self.n_substeps = n_substeps
@@ -195,7 +193,8 @@ class MouseArmImitationEnv(gym.Env):
         self.weight_paw = w_paw
         self.weight_elbow = w_elbow
 
-        self.w_jitter = w_jitter
+        self.w_qpos = w_qpos
+        self.w_qvel = w_qvel
         self.w_action = w_action
 
         self.muscle_color_theme = muscle_color_theme
@@ -213,12 +212,23 @@ class MouseArmImitationEnv(gym.Env):
 
         self._has_tendon_coloring = len(self._tendon_actuator_ids) > 0
 
+        self.shared_lock = None
+        self.kinematics_index = 0
+        self.kinematic_files = kinematic_files
+        self.kinematics_file_count = len(self.kinematic_files)
+
 
     def reset(self, seed=None, options=None):
         """
         Reset the environment to the solved start pose and return the initial observation.
         """
         super().reset(seed=seed)
+
+        self.update_kinematics()
+
+        # Solve frame 0 IK and replace the hard-coded start pose
+        self.solve_kinematic_scale()
+        self.solve_first_frame_start_qpos()
 
         # Apply custom start state
         self.data.qpos[:] = self.start_qpos
@@ -273,6 +283,7 @@ class MouseArmImitationEnv(gym.Env):
         self.post_phys_step()
 
         self.previous_qvel = self.new_qvel.copy()
+        self.previous_qpos =self.new_qpos.copy()
         obs = self._get_obs()
 
         # ----- Reward -----
@@ -285,9 +296,10 @@ class MouseArmImitationEnv(gym.Env):
 
         effort = np.sum(np.abs(self.data.actuator_force))
         
-        jitter_error = np.sum((self.new_qvel - self.previous_qvel) ** 2)
+        qpos_error = np.sum((self.new_qpos - self.previous_qpos) ** 2)
+        qvel_errr = np.sum((self.new_qvel - self.previous_qvel) ** 2)
 
-        reward = -(self.weight_bone_diff*average_diff + self.weight_effort*effort + self.w_jitter*jitter_error + self.w_action*action_error)
+        reward = -(self.weight_bone_diff*average_diff + self.weight_effort*effort + self.w_qvel*qvel_errr + self.w_qpos*qpos_error + self.w_action*action_error)
 
         terminated = (self.step_num >= self.max_steps-1)
         truncated = False
@@ -316,7 +328,9 @@ class MouseArmImitationEnv(gym.Env):
         Construct the current observation vector.
         """
         self.new_qvel = self.data.qvel.copy()
-        return np.concatenate([self.data.qpos, self.data.qvel]).astype(np.float32)
+        self.new_qpos = self.data.qpos.copy()
+        path_points = self.sample_path().reshape(-1)
+        return np.concatenate([self.data.qpos, self.data.qvel, path_points]).astype(np.float32)
 
     def render(self):
         """
@@ -645,3 +659,106 @@ class MouseArmImitationEnv(gym.Env):
         print("     kinematic_scale:", self.kinematic_scale)
         '''
         return self.kinematic_scale
+    
+    def sample_path(self):
+        """
+        Sample future kinematic target positions and return their differences from
+        the current cached target positions.
+
+        Returns:
+            diffs: shape (steps_forward, 2, 3)
+                diffs[t, 0] = future_elbow    - current_elbow
+                diffs[t, 1] = future_paw      - current_paw
+        """
+        steps_forward = int(self.path_steps)
+
+        if steps_forward <= 0:
+            return np.zeros((0, 3, 3), dtype=np.float32)
+
+        current_positions = np.stack(
+            [
+                self.elbow_pos,
+                self.paw_pos,
+            ],
+            axis=0,
+        )
+
+        diffs = []
+
+        for i in range(1, steps_forward + 1):
+            frame_idx = min(self.step_num + i, self.max_steps - 1)
+
+            shoulder_pos, elbow_pos, paw_pos = self._get_targets_for_frame(
+                frame_idx=frame_idx,
+                humerus_world_pos=self.humerus_pos,
+            )
+
+            future_positions = np.stack(
+                [
+                    elbow_pos,
+                    paw_pos,
+                ],
+                axis=0,
+            )
+
+            diffs.append(future_positions - current_positions)
+
+        return np.asarray(diffs, dtype=np.float32)
+    
+    def synchronized_function(self):
+        def critical_section():
+            index = self.kinematics_index
+            self.kinematics_index += 1
+            if self.kinematics_index >= self.kinematics_file_count:
+                self.kinematics_index = 0
+            return index
+
+        if self.shared_lock is not None: #is MultiProcessing or not MultiProcessing 
+            with self.shared_lock:
+                #only one env is here at a time
+                index= critical_section()
+        else:
+            index= critical_section()
+        return index
+
+    def update_kinematics(self):
+        index = self.synchronized_function()
+        kinematics = self.kinematic_files[index]
+
+        self.resolve_kinematic_columns(kinematics)
+
+        self.kinematic_data = np.loadtxt(
+            kinematics,
+            delimiter=",",
+            skiprows=1
+        )
+        self.max_steps = self.kinematic_data.shape[0]
+
+    def resolve_kinematic_columns(self, csv_path):
+        with open(csv_path, "r", encoding="utf-8") as f:
+            headers = [h.strip() for h in f.readline().strip().split(",")]
+
+        col_map = {name: i for i, name in enumerate(headers)}
+
+        # hardcode your actual column names here
+        paw_names = [
+            "paw_x",
+            "paw_y",
+            "paw_z",
+        ]
+
+        elbow_names = [
+            "elbow_x",
+            "elbow_y",
+            "elbow_z",
+        ]
+
+        shoulder_names = [
+            "shoulder_x",
+            "shoulder_y",
+            "shoulder_z",
+        ]
+
+        self.paw_cols = np.array([col_map[name] for name in paw_names], dtype=np.int64)
+        self.elbow_cols = np.array([col_map[name] for name in elbow_names], dtype=np.int64)
+        self.shoulder_cols = np.array([col_map[name] for name in shoulder_names], dtype=np.int64)

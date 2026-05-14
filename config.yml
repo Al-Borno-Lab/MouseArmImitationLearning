@@ -1,29 +1,33 @@
 general:
-  name: "MODEL_NAME"
+  name: ""
 
 environment:
-  model: "MODEL_FILE.xml"
-  kinematics: "KINEMATIC_FILE.csv"
-  w_bone_diff: 1.0
+  model: ""
+  kinematics: ""
+  train_ratio: 0.8
+  seed: 42
+  path_steps: 0
+  w_bone_diff: 100.0
   w_elbow: 1.0
   w_paw: 1.0
   w_effort: 0.0
-  w_jitter: 0.0
-  w_action: 0.000
+  w_qpos: 0.0
+  w_qvel: 0.0
+  w_action: 0.0
   control_dt: 0.006666666
   n_substeps: 16
 
 policy:
-  lstm_hidden_size: 256
+  lstm_hidden_size: 512
   n_lstm_layers: 1
-  net_arch_pi: [64, 64]
-  net_arch_vf: [64, 64]
+  net_arch_pi: [128, 128]
+  net_arch_vf: [128, 128]
 
 algorithm:
   learning_rate: 0.0001
 
-  n_steps: 256
-  batch_size: 256
+  n_steps: 512
+  batch_size: 512
   n_epochs: 20
 
   gamma: 0.99
@@ -38,8 +42,9 @@ algorithm:
   max_grad_norm: 0.5
 
 training:
-  timesteps: 1_000_000
+  timesteps: 2_500_000
   num_envs: 16
+  eval_freq: 15_000
 
 testing:
   slowmo: 0.1

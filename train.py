@@ -11,22 +11,32 @@ from pathlib import Path
 import shutil
 
 from imitation_env import MouseArmImitationEnv
+from data_helper import setup_files
+from train_callback import RecurrentTestEvalCallback
 
-def make_env(rank, config):
+import multiprocessing as mp
+
+ctx = mp.get_context("forkserver")
+shared_lock = ctx.Lock()
+
+def make_env(rank, config, kinematic_files):
     def _init():
         env = MouseArmImitationEnv(
             render_mode=None,
             model=config["environment"]["model"],
-            kinematics=config["environment"]["kinematics"], 
+            kinematic_files=kinematic_files, 
+            path_steps=config["environment"]["path_steps"],
             w_bone_diff=config["environment"]["w_bone_diff"],
             w_elbow=config["environment"]["w_elbow"],
             w_paw=config["environment"]["w_paw"],
             w_effort=config["environment"]["w_effort"],
-            w_jitter=config["environment"]["w_jitter"],
+            w_qvel=config["environment"]["w_qvel"],
+            w_qpos=config["environment"]["w_qpos"],
             w_action=config["environment"]["w_action"],
             control_dt=config["environment"]["control_dt"],
             n_substeps=config["environment"]["n_substeps"],
         )
+        env.shared_lock = shared_lock
         return Monitor(env)
     return _init
 
@@ -55,7 +65,11 @@ if __name__ == "__main__":
         with open(f"./agents/{model_name}/config.yml", "r") as file:
             config_loaded = yaml.safe_load(file)
 
-        env = SubprocVecEnv([make_env(i, config_loaded) for i in range(config["training"]["num_envs"])])
+        train_files, test_files = setup_files(path=config_loaded["environment"]["kinematics"],
+                                                train_ratio=config_loaded["environment"]["train_ratio"],
+                                                seed=config_loaded["environment"]["seed"])
+        env = SubprocVecEnv([make_env(i, config_loaded, train_files) for i in range(config["training"]["num_envs"])], 
+                            start_method="forkserver")
 
         model = RecurrentPPO.load(f"./agents/{model_name}/{iteration}", env=env)
         iteration += 1 
@@ -73,7 +87,11 @@ if __name__ == "__main__":
             net_arch=dict(pi=config["policy"]["net_arch_pi"], vf=config["policy"]["net_arch_vf"]),
         )
 
-        env = SubprocVecEnv([make_env(i, config) for i in range(config["training"]["num_envs"])])
+        train_files, test_files = setup_files(path=config["environment"]["kinematics"],
+                                                train_ratio=config["environment"]["train_ratio"],
+                                                seed=config["environment"]["seed"])
+        env = SubprocVecEnv([make_env(i, config, train_files) for i in range(config["training"]["num_envs"])],
+                            start_method="forkserver")
 
         model = RecurrentPPO(
             policy=MlpLstmPolicy,
@@ -108,11 +126,23 @@ if __name__ == "__main__":
         destination = target_folder / config_path.name
         shutil.copy2(config_path, destination)
 
+    test_env = SubprocVecEnv(
+        [make_env(i, config, test_files) for i in range(1)],
+        start_method="forkserver",
+    )
+    eval_callback = RecurrentTestEvalCallback(
+        eval_env=test_env,
+        eval_freq= max(config["training"]["eval_freq"] // config["training"]["num_envs"], 1),
+        n_eval_episodes=len(test_files),
+        model_path=f"./agents/{model_name}/",
+        deterministic=False,
+    )
 
     print("start learning...")
     model.learn(
         total_timesteps=config["training"]["timesteps"],
         tb_log_name=model_name,
-        reset_num_timesteps=False
+        reset_num_timesteps=False,
+        callback=eval_callback
     )
     model.save(f"./agents/{model_name}/{iteration}")

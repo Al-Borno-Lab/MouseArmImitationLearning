@@ -6,6 +6,7 @@ from pathlib import Path
 from sb3_contrib import RecurrentPPO
 
 from imitation_env import MouseArmImitationEnv
+from data_helper import setup_files
 
 with open("config.yml", "r") as file:
     config = yaml.safe_load(file)
@@ -29,15 +30,20 @@ with open(f"./agents/{model_name}/config.yml", "r") as file:
     config_loaded = yaml.safe_load(file)
 
 # Create env (rendering so you can watch it)
+train_files, test_files = setup_files(path=config["environment"]["kinematics"],
+                                                train_ratio=config["environment"]["train_ratio"],
+                                                seed=config["environment"]["seed"])
 env = MouseArmImitationEnv(
     render_mode="human", 
     model=config_loaded["environment"]["model"],
-    kinematics=config_loaded["environment"]["kinematics"],
+    kinematic_files=test_files,
+    path_steps=config["environment"]["path_steps"],
     w_bone_diff=config_loaded["environment"]["w_bone_diff"],
     w_elbow=config_loaded["environment"]["w_elbow"],
     w_paw=config_loaded["environment"]["w_paw"],
     w_effort=config_loaded["environment"]["w_effort"],
-    w_jitter=config_loaded["environment"]["w_jitter"],
+    w_qvel=config["environment"]["w_qvel"],
+    w_qpos=config["environment"]["w_qpos"],
     w_action=config_loaded["environment"]["w_action"],
     control_dt=config_loaded["environment"]["control_dt"],
     n_substeps=config_loaded["environment"]["n_substeps"],
