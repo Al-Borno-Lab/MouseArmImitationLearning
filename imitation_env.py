@@ -4,16 +4,23 @@ import numpy as np
 import mujoco
 import mujoco.viewer
 from scipy.optimize import least_squares
+import time
 
 # -----------------------------
 # Helpers
 # -----------------------------
-def zxy_to_xyz(v):
+def opensim_to_mujoco(v):
     """
-    Convert a 3-vector from kinematic [z, x, y] ordering into MuJoCo/world [x, y, z] ordering.
+    Input:  [OpenSim x, OpenSim y, OpenSim z]
+    Output: [MuJoCo x, MuJoCo y, MuJoCo z]
+
+    Mapping:
+        OpenSim x -> MuJoCo y
+        OpenSim y -> MuJoCo z
+        OpenSim z -> MuJoCo x
     """
-    # v is shape (3,) in [z, x, y]
-    return np.array([v[2], v[0], v[1]], dtype=np.float64)
+    x, y, z = v
+    return np.array([z, x, y], dtype=np.float64)
 
 def add_sphere_marker(viewer, pos, rgba, radius=0.02):
     """
@@ -105,13 +112,14 @@ def mujoco_unstable(data):
 class MouseArmImitationEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 60}
 
-    def __init__(self, kinematic_files, model,
+    def __init__(self, kinematic_files, model, shared_var,
                  render_mode: str | None = None,
                  w_bone_diff = 1.0, w_effort = 1.0, w_elbow = 1.0, w_paw = 1.0,
-                 w_qpos = 1.0, w_qvel = 1.0, w_action = 1.0,
+                 w_qpos = 0.0, w_qvel = 0.0, w_action = 0.0,
                  path_steps = 0,
                  muscle_color_theme = "grey_red",
-                 control_dt = 0.006666666, n_substeps = 16):
+                 control_dt = 0.006666666, n_substeps = 16,
+                 step_delay=0):
         """
         Initialize the mouse arm imitation environment.
         Args:
@@ -175,7 +183,6 @@ class MouseArmImitationEnv(gym.Env):
             "elbow_flex": -0.011,
         }
 
-        self.kinematic_scale = None
         self.start_qpos = make_start_qpos_from_named_hinges(self.model, self.data, self.angles)#self.model.qpos0.copy()          # replace later with your own
         self.start_qvel = np.zeros(self.model.nv)          # replace later with your own
 
@@ -212,10 +219,12 @@ class MouseArmImitationEnv(gym.Env):
 
         self._has_tendon_coloring = len(self._tendon_actuator_ids) > 0
 
-        self.shared_lock = None
+        self.shared_var = shared_var
         self.kinematics_index = 0
         self.kinematic_files = kinematic_files
         self.kinematics_file_count = len(self.kinematic_files)
+
+        self.step_delay = step_delay
 
 
     def reset(self, seed=None, options=None):
@@ -227,7 +236,6 @@ class MouseArmImitationEnv(gym.Env):
         self.update_kinematics()
 
         # Solve frame 0 IK and replace the hard-coded start pose
-        self.solve_kinematic_scale()
         self.solve_first_frame_start_qpos()
 
         # Apply custom start state
@@ -258,9 +266,9 @@ class MouseArmImitationEnv(gym.Env):
         self.radius_pos = self.data.xanchor[self.radius_id]
         self.wrist_marker_world_pos = self.data.site_xpos[self.geom_id]
 
-        self.shoulder_pos = zxy_to_xyz(self.kinematic_data[self.step_num, self.shoulder_cols])
-        self.elbow_pos = (zxy_to_xyz(self.kinematic_data[self.step_num, self.elbow_cols]) - self.shoulder_pos)/self.kinematic_scale
-        self.paw_pos = (zxy_to_xyz(self.kinematic_data[self.step_num, self.paw_cols]) - self.shoulder_pos)/self.kinematic_scale
+        self.shoulder_pos = opensim_to_mujoco(self.kinematic_data[self.step_num, self.shoulder_cols])
+        self.elbow_pos = (opensim_to_mujoco(self.kinematic_data[self.step_num, self.elbow_cols]) - self.shoulder_pos)
+        self.paw_pos = (opensim_to_mujoco(self.kinematic_data[self.step_num, self.paw_cols]) - self.shoulder_pos)
         self.shoulder_pos = self.shoulder_pos - self.shoulder_pos
 
         shoulder_offset = self.shoulder_pos - self.humerus_pos
@@ -272,6 +280,9 @@ class MouseArmImitationEnv(gym.Env):
         """
         Apply an action, advance physics, update targets, and compute reward and termination.
         """
+        if self.step_delay > 0.0:
+            time.sleep(self.step_delay)
+
         action = np.asarray(action, dtype=np.float32)
         self.previous_action = self.data.ctrl[:].copy()
         self.data.ctrl[:] = action
@@ -320,7 +331,7 @@ class MouseArmImitationEnv(gym.Env):
             terminated=True
             reward*=1.2 #this scales the last reward nicely instead of random +c on unknown dt
             print("caught bad state, ending...")
-
+        
         return obs, reward, terminated, truncated, {}
 
     def _get_obs(self):
@@ -406,9 +417,9 @@ class MouseArmImitationEnv(gym.Env):
         Returns:
             shoulder_pos, elbow_pos, paw_pos   each shape (3,)
         """
-        shoulder_pos = zxy_to_xyz(self.kinematic_data[frame_idx, self.shoulder_cols])
-        elbow_pos = (zxy_to_xyz(self.kinematic_data[frame_idx, self.elbow_cols]) - shoulder_pos) / self.kinematic_scale
-        paw_pos = (zxy_to_xyz(self.kinematic_data[frame_idx, self.paw_cols]) - shoulder_pos) / self.kinematic_scale
+        shoulder_pos = opensim_to_mujoco(self.kinematic_data[frame_idx, self.shoulder_cols])
+        elbow_pos = (opensim_to_mujoco(self.kinematic_data[frame_idx, self.elbow_cols]) - shoulder_pos)
+        paw_pos = (opensim_to_mujoco(self.kinematic_data[frame_idx, self.paw_cols]) - shoulder_pos)
         shoulder_pos = shoulder_pos - shoulder_pos   # zero it, same as your current code
 
         shoulder_offset = shoulder_pos - humerus_world_pos
@@ -585,81 +596,6 @@ class MouseArmImitationEnv(gym.Env):
 
         return humerus_pos, radius_pos, hand_pos
     
-    def solve_kinematic_scale(self, frame_idx: int = 0):
-        """
-        Solve one scalar kinematic scale so that the two actual arm segments match:
-            upper: shoulder -> elbow
-            lower: elbow -> paw
-
-        This is separate from IK.
-        """
-        humerus_pos, radius_pos, hand_pos = self._get_model_points_for_qpos(self.start_qpos)
-
-        shoulder_raw = zxy_to_xyz(self.kinematic_data[frame_idx, self.shoulder_cols])
-        elbow_raw = zxy_to_xyz(self.kinematic_data[frame_idx, self.elbow_cols])
-        paw_raw = zxy_to_xyz(self.kinematic_data[frame_idx, self.paw_cols])
-
-        # Kinematic segment lengths
-        kin_upper_len = np.linalg.norm(elbow_raw - shoulder_raw)
-        kin_lower_len = np.linalg.norm(paw_raw - elbow_raw)
-
-        # Model segment lengths
-        model_upper_len = np.linalg.norm(radius_pos - humerus_pos)
-        model_lower_len = np.linalg.norm(hand_pos - radius_pos)
-
-        eps = 1e-8
-        if kin_upper_len <= eps or kin_lower_len <= eps:
-            raise ValueError("Kinematic segment lengths were near zero.")
-        if model_upper_len <= eps or model_lower_len <= eps:
-            raise ValueError("Model segment lengths were near zero.")
-
-        def residual(scale_array):
-            scale = float(scale_array[0])
-
-            if scale <= eps:
-                return np.array([1e6, 1e6], dtype=np.float64)
-
-            scaled_upper_len = kin_upper_len / scale
-            scaled_lower_len = kin_lower_len / scale
-
-            upper_res = scaled_upper_len - model_upper_len
-            lower_res = scaled_lower_len - model_lower_len
-
-            return np.array([upper_res, lower_res], dtype=np.float64)
-
-        # starting guess from direct ratios
-        s0 = 0.5 * (
-            kin_upper_len / model_upper_len +
-            kin_lower_len / model_lower_len
-        )
-
-        result = least_squares(
-            residual,
-            x0=np.array([s0], dtype=np.float64),
-            bounds=(np.array([eps], dtype=np.float64), np.array([np.inf], dtype=np.float64)),
-            max_nfev=100,
-            verbose=0,
-        )
-
-        self.kinematic_scale = float(result.x[0])
-
-        scaled_upper_len = kin_upper_len / self.kinematic_scale
-        scaled_lower_len = kin_lower_len / self.kinematic_scale
-        '''
-        print("Kinematic scale solve done")
-        print("     success:", result.success)
-        print("     status:", result.status)
-        print("     cost:", result.cost)
-        print("     nfev:", result.nfev)
-        print("     frame_idx:", frame_idx)
-        print("     model_upper_len:", model_upper_len)
-        print("     model_lower_len:", model_lower_len)
-        print("     scaled_upper_len:", scaled_upper_len)
-        print("     scaled_lower_len:", scaled_lower_len)
-        print("     kinematic_scale:", self.kinematic_scale)
-        '''
-        return self.kinematic_scale
-    
     def sample_path(self):
         """
         Sample future kinematic target positions and return their differences from
@@ -706,20 +642,10 @@ class MouseArmImitationEnv(gym.Env):
         return np.asarray(diffs, dtype=np.float32)
     
     def synchronized_function(self):
-        def critical_section():
-            index = self.kinematics_index
-            self.kinematics_index += 1
-            if self.kinematics_index >= self.kinematics_file_count:
-                self.kinematics_index = 0
+        with self.shared_var.get_lock():
+            index = self.shared_var.value
+            self.shared_var.value = (index + 1) % self.kinematics_file_count
             return index
-
-        if self.shared_lock is not None: #is MultiProcessing or not MultiProcessing 
-            with self.shared_lock:
-                #only one env is here at a time
-                index= critical_section()
-        else:
-            index= critical_section()
-        return index
 
     def update_kinematics(self):
         index = self.synchronized_function()
@@ -762,3 +688,32 @@ class MouseArmImitationEnv(gym.Env):
         self.paw_cols = np.array([col_map[name] for name in paw_names], dtype=np.int64)
         self.elbow_cols = np.array([col_map[name] for name in elbow_names], dtype=np.int64)
         self.shoulder_cols = np.array([col_map[name] for name in shoulder_names], dtype=np.int64)
+
+
+# -----------------------------
+# Spawner
+# -----------------------------
+import multiprocessing.context as mp_context
+
+def make_MouseArmImitationEnv(rank, config):
+    def _init():
+        env = MouseArmImitationEnv(
+            render_mode=config["render_mode"],
+            model=config["model"],
+            kinematic_files=config["kinematic_files"],
+            shared_var=config["shared_var"],
+            path_steps=config["path_steps"],
+            w_bone_diff=config["w_bone_diff"],
+            w_elbow=config["w_elbow"],
+            w_paw=config["w_paw"],
+            w_effort=config["w_effort"],
+            w_qvel=config["w_qvel"],
+            w_qpos=config["w_qpos"],
+            w_action=config["w_action"],
+            control_dt=config["control_dt"],
+            n_substeps=config["n_substeps"],
+            step_delay=config["step_delay"]
+        )
+        return env
+
+    return _init
