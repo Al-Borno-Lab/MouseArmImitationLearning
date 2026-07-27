@@ -133,7 +133,7 @@ This project was created and tested on linux (specifically ubuntu), and while it
     ~~~
     BUCKET="bucket_name"
 
-    gcloud storage buckets create "gs://mouse-arm-training-dz-2026-results" \
+    gcloud storage buckets create "gs://$BUCKET" \
         --project="$PROJECT_ID" \
         --uniform-bucket-level-access
     ~~~
@@ -180,9 +180,9 @@ This project was created and tested on linux (specifically ubuntu), and while it
     - **n_substeps**: Simulation sub-steps per environment step (increasing improves simulation stability)
 &nbsp;
 3. Model
-    - **rnn_type**: Recurrent Backbone Type, choices are: lstm, gru, rnn
+    - **rnn_type**: Recurrent Backbone Type, choices are: lstm, gru, rnn, ffn
     - **rnn_hidden_size**: Hidden layer size in rnn
-    - **rnn_layer**: Hidden layers in rnn
+    - **rnn_layers**: Hidden layers in rnn
     - **policy_hidden_size**: Hidden layer size in policy
     - **policy_layers**: Hidden layers in policy
     - **value_hidden_size**: Hidden layer size in value
@@ -191,14 +191,14 @@ This project was created and tested on linux (specifically ubuntu), and while it
 &nbsp;
 4. Algorithm (There are more advanced terms in the config that are unlisted here, see the SKRL PPO API for more info; NOTE: the clip_range's and max_grad_norm have the largest effect on training)
     - **learning_rate**: Learning rate for training
-    - **n_mini_batches**: TODO
+    - **n_mini_batches**: Number of mini-batches to split each training iteration's data into
     - **n_epochs**: Training epochs per iteration
 &nbsp;
 5. Training
     - **timesteps**: Total time steps across all training  
     - **num_envs**: Number of environments running in parallel
-    - **checkpoint_interval**: How often to save a model checkpoint (in case of failure during training) in time steps
-    - **rollout_length**: Time steps per training iteration
+    - **checkpoint_interval**: How often to save a model checkpoint as whole number percentage (example: 5 for 5%)
+    - **rollout_length**: Time steps per training iteration (for all environments together, not for each environment)
 &nbsp;
 6. Testing
     - **step_delay**: Sleep time between frames (visual only), increase for greater slow-mo effect
