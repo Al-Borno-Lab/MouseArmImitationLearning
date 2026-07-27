@@ -11,6 +11,7 @@ class ReccurentLayerType(Enum):
     LSTM = "lstm"
     GRU = "gru"
     RNN = "rnn"
+    NOT_RECURRENT = "ffn"
 
 
 class RecurrentLayers(nn.Module):
@@ -22,6 +23,9 @@ class RecurrentLayers(nn.Module):
         self.num_layers = num_layers
         self.sequence_length = sequence_length
         self.num_envs = num_envs
+
+        self.record_hidden_states = False
+        self.recorded_hidden_states = []
 
     def set_training(self, enabled: bool):
         self.training = enabled
@@ -77,10 +81,24 @@ class RecurrentLayers(nn.Module):
             rnn_input = observations.view(-1, 1, observations.shape[-1])  # (N, L, Hin): N=num_envs, L=1
             rnn_output, hidden_states = self.rnn(rnn_input, hidden_states)
 
+            if self.record_hidden_states:                                                                                        
+                self.recorded_hidden_states.append(hidden_states.detach().cpu().clone())
+
         # flatten the RNN output
         rnn_output = torch.flatten(rnn_output, start_dim=0, end_dim=1)  # (N, L, D ∗ Hout) -> (N * L, D ∗ Hout)
 
         return rnn_output, {"rnn": [hidden_states]}
+    
+    def start_recording(self):
+        self.record_hidden_states = True
+        self.recorded_hidden_states = []
+
+    def stop_recording(self):
+        self.record_hidden_states = False
+
+    def get_recorded_hidden_states(self):
+        recorded_hidden_states = torch.cat(self.recorded_hidden_states, dim=0)
+        return recorded_hidden_states
 
 
 class RNN(RecurrentLayers):
@@ -93,7 +111,7 @@ class RNN(RecurrentLayers):
 class GRU(RecurrentLayers):
     def __init__(self, input_size, hidden_size, num_layers, sequence_length, num_envs):
         super().__init__(input_size=input_size, hidden_size=hidden_size, num_layers=num_layers, sequence_length=sequence_length, num_envs=num_envs)
-        self.gru = nn.GRU(
+        self.rnn = nn.GRU(
             input_size=self.input_size, hidden_size=self.hidden_size, num_layers=self.num_layers, batch_first=True
         )  # batch_first -> (batch, sequence, features)
 
@@ -101,7 +119,7 @@ class GRU(RecurrentLayers):
 class LSTM(RecurrentLayers):
     def __init__(self, input_size, hidden_size, num_layers, sequence_length, num_envs):
         super().__init__(input_size=input_size, hidden_size=hidden_size, num_layers=num_layers, sequence_length=sequence_length, num_envs=num_envs)
-        self.lstm = nn.LSTM(
+        self.rnn = nn.LSTM(
             input_size=self.input_size, hidden_size=self.hidden_size, num_layers=self.num_layers, batch_first=True
         )  # batch_first -> (batch, sequence, features)
 
@@ -149,7 +167,7 @@ class LSTM(RecurrentLayers):
 
                 for i in range(len(indexes) - 1):
                     i0, i1 = indexes[i], indexes[i + 1]
-                    rnn_output, (hidden_states, cell_states) = self.lstm(
+                    rnn_output, (hidden_states, cell_states) = self.rnn(
                         rnn_input[:, i0:i1, :], (hidden_states, cell_states)
                     )
                     hidden_states[:, (terminated[:, i1 - 1]), :] = 0
@@ -160,17 +178,76 @@ class LSTM(RecurrentLayers):
                 rnn_output = torch.cat(rnn_outputs, dim=1)
             # no need to reset the RNN state in the sequence
             else:
-                rnn_output, rnn_states = self.lstm(rnn_input, (hidden_states, cell_states))
+                rnn_output, rnn_states = self.rnn(rnn_input, (hidden_states, cell_states))
         # rollout
         else:
             rnn_input = observations.view(-1, 1, observations.shape[-1])  # (N, L, Hin): N=num_envs, L=1
-            rnn_output, rnn_states = self.lstm(rnn_input, (hidden_states, cell_states))
+            rnn_output, rnn_states = self.rnn(rnn_input, (hidden_states, cell_states))
+
+            if self.record_hidden_states:    
+                hidden_states = rnn_states[0] #i think we will use just the hidden for all of them, not cell
+                self.recorded_hidden_states.append(hidden_states.detach().cpu().clone())
 
         # flatten the RNN output
         rnn_output = torch.flatten(rnn_output, start_dim=0, end_dim=1)  # (N, L, D ∗ Hout) -> (N * L, D ∗ Hout)
 
         return rnn_output, {"rnn": [rnn_states[0], rnn_states[1]]}
-    
+
+
+class NotAReccurentLayer(RecurrentLayers):
+    def __init__(self, input_size, hidden_size, num_layers, sequence_length, num_envs):
+        super().__init__(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            sequence_length=sequence_length,
+            num_envs=num_envs,
+        )
+
+        layers = []
+        in_features = self.input_size
+
+        for _ in range(self.num_layers):
+            layers.append(nn.Linear(in_features, self.hidden_size))
+            layers.append(nn.Tanh())
+            in_features = self.hidden_size
+
+        self.rnn = nn.Sequential(*layers)
+
+    def compute(self, inputs):
+        observations = inputs["observations"]
+
+        # Feed-forward output.
+        output = self.rnn(observations)
+
+        # Fake recurrent state so skrl's recurrent interface still gets what it expects.
+        #
+        # output is shaped:
+        #   training: (num_envs * sequence_length, hidden_size)
+        #   rollout:  (num_envs, hidden_size)
+        #
+        # rnn state is expected to be:
+        #   (num_layers, num_envs, hidden_size)
+        if self.training:
+            hidden_states = output.view(
+                -1,
+                self.sequence_length,
+                self.hidden_size,
+            )[:, -1, :]  # last item in each sequence: (N, hidden_size)
+        else:
+            hidden_states = output  # rollout is already one step: (num_envs, hidden_size)
+
+        hidden_states = hidden_states.unsqueeze(0).repeat(
+            self.num_layers,
+            1,
+            1,
+        )  # (num_layers, N, hidden_size)
+
+        if not self.training and self.record_hidden_states:
+            self.recorded_hidden_states.append(hidden_states.detach().cpu().clone())
+
+        return output, {"rnn": [hidden_states]}
+
 #==========================================================================
 # Model
 #==========================================================================
@@ -247,6 +324,14 @@ class SharedModel(GaussianMixin, DeterministicMixin, Model):
                 sequence_length=sequence_length, 
                 num_envs=num_envs
             )
+        elif rnn_type == ReccurentLayerType.NOT_RECURRENT:
+            self.reccurent_layers = NotAReccurentLayer(
+                input_size=self.num_observations,
+                hidden_size=rnn_hidden_size,  # FFN feature/output size
+                num_layers=rnn_layers,        # FFN layer count
+                sequence_length=sequence_length,
+                num_envs=num_envs,
+            )
         else:
             raise ValueError(
                 f"Unsupported rnn_type: {rnn_type!r}. "
@@ -254,6 +339,7 @@ class SharedModel(GaussianMixin, DeterministicMixin, Model):
                 f"{ReccurentLayerType.RNN}, "
                 f"{ReccurentLayerType.GRU}, "
                 f"{ReccurentLayerType.LSTM}."
+                f"{ReccurentLayerType.NOT_RECURRENT}."
             )
         hidden_size = self.reccurent_layers.hidden_size
 
@@ -270,7 +356,6 @@ class SharedModel(GaussianMixin, DeterministicMixin, Model):
         policy_layers_list.append(nn.Tanh())
 
         self.mean_layer = nn.Sequential(*policy_layers_list)
-        self.log_std_parameter = nn.Parameter(torch.zeros(self.num_actions))
 
 
         # separated layers ("value" head)
@@ -302,6 +387,13 @@ class SharedModel(GaussianMixin, DeterministicMixin, Model):
 
         self.action_center = (action_high + action_low) / 2.0
         self.action_scale = (action_high - action_low) / 2.0
+
+        initial_std = (self.action_scale).clamp(min=1e-6)
+        initial_log_std = torch.log(initial_std)
+
+        self.log_std_parameter = nn.Parameter(initial_log_std.to(dtype=torch.float32))
+
+        self.init_head_weights()
 
     def enable_training_mode(self, enabled = True):
         output = super().enable_training_mode(enabled)
@@ -339,3 +431,34 @@ class SharedModel(GaussianMixin, DeterministicMixin, Model):
                 None  # reset saved shared output to prevent the use of erroneous data in subsequent steps
             )
             return self.value_layer(shared_output), {}
+
+    def init_head_weights(self):
+        tanh_gain = nn.init.calculate_gain("tanh")
+
+        # Policy head
+        policy_linear_layers = [
+            m for m in self.mean_layer
+            if isinstance(m, nn.Linear)
+        ]
+
+        for layer in policy_linear_layers:
+            nn.init.orthogonal_(layer.weight, gain=tanh_gain)
+            nn.init.constant_(layer.bias, 0.0)
+
+        # final actor mean layer should be tiny
+        nn.init.orthogonal_(policy_linear_layers[-1].weight, gain=0.01)
+        nn.init.constant_(policy_linear_layers[-1].bias, 0.0)
+
+        # Value head
+        value_linear_layers = [
+            m for m in self.value_layer
+            if isinstance(m, nn.Linear)
+        ]
+
+        for layer in value_linear_layers:
+            nn.init.orthogonal_(layer.weight, gain=tanh_gain)
+            nn.init.constant_(layer.bias, 0.0)
+
+        # final critic output
+        nn.init.orthogonal_(value_linear_layers[-1].weight, gain=1.0)
+        nn.init.constant_(value_linear_layers[-1].bias, 0.0)

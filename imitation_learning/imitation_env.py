@@ -119,7 +119,11 @@ class MouseArmImitationEnv(gym.Env):
                  path_steps = 0,
                  muscle_color_theme = "grey_red",
                  control_dt = 0.006666666, n_substeps = 16,
-                 step_delay=0):
+                 step_delay=0,
+                 #these are set through testing probably dont change:
+                 worst_diff = 6.153614585836757e-07, worst_diff_multiplier = 40, 
+                 early_stop_reward_multiplier=10, early_stop_reward_exponent = 1,
+                 early_stop_enabled = True):
         """
         Initialize the mouse arm imitation environment.
         Args:
@@ -226,6 +230,15 @@ class MouseArmImitationEnv(gym.Env):
 
         self.step_delay = step_delay
 
+        self.reward_stats_sum = {}
+        self.reward_stats_count = 0
+
+        self.worst_diff = worst_diff
+        self.worst_diff_multiplier = worst_diff_multiplier
+        self.early_stop_reward_multiplier = early_stop_reward_multiplier
+        self.early_stop_reward_exponent = early_stop_reward_exponent
+        self.early_stop_enabled = early_stop_enabled
+
 
     def reset(self, seed=None, options=None):
         """
@@ -314,6 +327,11 @@ class MouseArmImitationEnv(gym.Env):
 
         terminated = (self.step_num >= self.max_steps-1)
         truncated = False
+        
+        if self.early_stop_enabled and average_diff > self.worst_diff * self.worst_diff_multiplier:
+            remaining_steps = (self.max_steps-1) - self.step_num
+            reward -= (remaining_steps**self.early_stop_reward_exponent)*((self.worst_diff*self.worst_diff_multiplier)*self.early_stop_reward_multiplier)*self.weight_bone_diff
+            terminated = True
 
         if self.render_mode == "human":
             self.render()
@@ -331,8 +349,25 @@ class MouseArmImitationEnv(gym.Env):
             terminated=True
             reward*=1.2 #this scales the last reward nicely instead of random +c on unknown dt
             print("caught bad state, ending...")
-        
-        return obs, reward, terminated, truncated, {}
+
+        bone_mse = (paw_diff+elbow_diff)/2
+        reward_stats = {
+            "shoulder_diff": float(shoulder_diff),
+            "elbow_diff": float(elbow_diff),
+            "paw_diff": float(paw_diff),
+            "average_diff": float(average_diff),
+            "effort": float(effort),
+            "action_error": float(action_error),
+            "qpos_error": float(qpos_error),
+            "qvel_error": float(qvel_errr),
+            "bone_mse": float(bone_mse),
+        }
+        self.record_reward_stats(reward_stats)
+        info = {
+            "reward_stats": reward_stats,
+        }
+
+        return obs, reward, terminated, truncated, info
 
     def _get_obs(self):
         """
@@ -649,8 +684,10 @@ class MouseArmImitationEnv(gym.Env):
 
     def update_kinematics(self):
         index = self.synchronized_function()
-        kinematics = self.kinematic_files[index]
+        self.kinematics_index = index
 
+        kinematics = self.kinematic_files[index]
+        #print(f"kin: {kinematics}")
         self.resolve_kinematic_columns(kinematics)
 
         self.kinematic_data = np.loadtxt(
@@ -659,6 +696,9 @@ class MouseArmImitationEnv(gym.Env):
             skiprows=1
         )
         self.max_steps = self.kinematic_data.shape[0]
+
+    def get_current_kinematic_file(self):
+        return self.kinematic_files[self.kinematics_index]
 
     def resolve_kinematic_columns(self, csv_path):
         with open(csv_path, "r", encoding="utf-8") as f:
@@ -689,6 +729,38 @@ class MouseArmImitationEnv(gym.Env):
         self.elbow_cols = np.array([col_map[name] for name in elbow_names], dtype=np.int64)
         self.shoulder_cols = np.array([col_map[name] for name in shoulder_names], dtype=np.int64)
 
+    def record_reward_stats(self, stats: dict):
+        """
+        Accumulate reward stats so the main script can periodically pull
+        mean values for TensorBoard logging.
+        """
+        for key, value in stats.items():
+            self.reward_stats_sum[key] = self.reward_stats_sum.get(key, 0.0) + float(value)
+
+        self.reward_stats_count += 1
+
+
+    def pop_reward_stats(self):
+        """
+        Return mean reward stats since the last call, then reset the accumulator.
+        Works for both training and evaluation logging.
+        """
+        count = self.reward_stats_count
+
+        if count <= 0:
+            return {"_count": 0}
+
+        means = {
+            key: value / count
+            for key, value in self.reward_stats_sum.items()
+        }
+
+        means["_count"] = count
+
+        self.reward_stats_sum = {}
+        self.reward_stats_count = 0
+
+        return means
 
 # -----------------------------
 # Spawner
@@ -712,7 +784,8 @@ def make_MouseArmImitationEnv(rank, config):
             w_action=config["w_action"],
             control_dt=config["control_dt"],
             n_substeps=config["n_substeps"],
-            step_delay=config["step_delay"]
+            step_delay=config["step_delay"],
+            early_stop_enabled=config["early_stop_enabled"]
         )
         return env
 

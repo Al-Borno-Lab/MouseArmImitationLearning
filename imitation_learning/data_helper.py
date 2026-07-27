@@ -2,17 +2,15 @@ import os
 import random
 
 def get_all_files(root_folder):
-
     """
     Recursively collect all file paths under root_folder,
-    skipping hidden directories (starting with ".").
+    skipping hidden directories and hidden files.
 
     Returns:
-        List of relative file paths like:
-        ["dir/subdir/file.txt", "dir/subdir2/nested/file2.csv", ...]
+        List of file paths including the original root_folder prefix, e.g.
+        ["data/Welle/kinematics/20210427/58/249.csv", ...]
     """
     file_paths = []
-    root_name = os.path.basename(os.path.normpath(root_folder))
 
     for current_root, dirs, files in os.walk(root_folder):
         dirs[:] = [d for d in dirs if not d.startswith(".")]
@@ -22,9 +20,7 @@ def get_all_files(root_folder):
                 continue
 
             full_path = os.path.join(current_root, file)
-            rel_path = os.path.relpath(full_path, root_folder)
-
-            file_paths.append(os.path.join(root_name, rel_path))
+            file_paths.append(full_path)
 
     return file_paths
 

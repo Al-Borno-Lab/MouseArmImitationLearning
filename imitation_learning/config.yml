@@ -1,0 +1,47 @@
+general:
+  name: lstm_32
+  folder: ./Welle/models/58/512/42/muscle
+  mode: train
+  seed: 42
+environment:
+  model: model/scaled_mujoco_model_muscle_58.xml
+  kinematics: Welle/kinematics/58
+  train_ratio: 0.8
+  seed: 42
+  path_steps: 3
+  w_bone_diff: 100.0
+  w_elbow: 1.0
+  w_paw: 1.0
+  w_effort: 1.0e-06
+  w_qpos: 0.0
+  w_qvel: 0.0
+  w_action: 0.0
+  control_dt: 0.00598485
+  n_substeps: 16
+model:
+  rnn_type: lstm
+  rnn_hidden_size: 512
+  rnn_layers: 1
+  policy_hidden_size: 256
+  policy_layers: 2
+  value_hidden_size: 256
+  value_layers: 2
+  sequence_length: 55
+algorithm:
+  learning_rate: 3.0e-05
+  n_mini_batches: 16
+  n_epochs: 30
+  discount_factor: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.175
+  clip_range_vf: 0.175
+  ent_coef: 0.005
+  vf_coef: 0.5
+  max_grad_norm: 0.175
+training:
+  timesteps: 1500000
+  num_envs: 16
+  checkpoint_interval: 10000
+  rollout_length: 880
+testing:
+  step_delay: 0.1
