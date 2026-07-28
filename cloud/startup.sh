@@ -24,6 +24,10 @@ sudo chown -R "$(id -u):$(id -g)" "$CONDA_DIR" "$REPOSITORY_DIR"
 
 source "$CONDA_DIR/etc/profile.d/conda.sh"
 
+conda config --system --remove-key channels || true
+conda config --system --add channels conda-forge
+conda config --system --set channel_priority strict
+
 cd "$REPOSITORY_DIR"
 
 conda env create -f environment.yml

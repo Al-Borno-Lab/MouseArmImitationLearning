@@ -354,6 +354,10 @@ def list_resource_zones(
     return zones
 
 
+def uses_integrated_gpu_machine(machine_type: str) -> bool:
+    return machine_type.startswith("g2-")
+
+
 def discover_compatible_zones(
     *,
     project_id: str,
@@ -362,14 +366,6 @@ def discover_compatible_zones(
     gpu: str,
     dry_run: bool,
 ) -> list[str]:
-    gpu_zones = list_resource_zones(
-        project_id=project_id,
-        resource_group="accelerator-types",
-        resource_name=gpu,
-        region=region,
-        dry_run=dry_run,
-    )
-
     machine_zones = list_resource_zones(
         project_id=project_id,
         resource_group="machine-types",
@@ -378,9 +374,25 @@ def discover_compatible_zones(
         dry_run=dry_run,
     )
 
-    compatible_zones = sorted(gpu_zones & machine_zones)
+    if uses_integrated_gpu_machine(machine_type):
+        compatible_zones = sorted(machine_zones)
+    else:
+        gpu_zones = list_resource_zones(
+            project_id=project_id,
+            resource_group="accelerator-types",
+            resource_name=gpu,
+            region=region,
+            dry_run=dry_run,
+        )
+        compatible_zones = sorted(gpu_zones & machine_zones)
 
     if not compatible_zones:
+        if uses_integrated_gpu_machine(machine_type):
+            raise RuntimeError(
+                f"No zones in region '{region}' support machine type "
+                f"'{machine_type}'."
+            )
+
         raise RuntimeError(
             f"No zones in region '{region}' support both GPU '{gpu}' "
             f"and machine type '{machine_type}'."
@@ -455,7 +467,7 @@ def create_vm(
     image_family: str,
     image_project: str,
     dry_run: bool,
-) -> None:
+) -> bool:
     command = [
         "gcloud",
         "compute",
@@ -468,29 +480,104 @@ def create_vm(
         zone,
         "--machine-type",
         machine_type,
-        "--accelerator",
-        f"type={gpu},count=1",
-        "--maintenance-policy",
-        "TERMINATE",
-        "--boot-disk-size",
-        f"{size_gb}GB",
-        "--image-family",
-        image_family,
-        "--image-project",
-        image_project,
-        "--scopes",
-        "cloud-platform",
-        "--metadata-from-file",
-        f"startup-script={startup_script_path}",
-        "--metadata",
-        (
-            f"assignment-bucket={assignment_bucket},"
-            f"assignment-index={assignment_index}"
-        ),
     ]
 
-    run_command(command, dry_run=dry_run)
+    if not uses_integrated_gpu_machine(machine_type):
+        command.extend(
+            [
+                "--accelerator",
+                f"type={gpu},count=1",
+            ]
+        )
 
+    command.extend(
+        [
+            "--maintenance-policy",
+            "TERMINATE",
+            "--boot-disk-size",
+            f"{size_gb}GB",
+            "--image-family",
+            image_family,
+            "--image-project",
+            image_project,
+            "--scopes",
+            "cloud-platform",
+            "--metadata-from-file",
+            f"startup-script={startup_script_path}",
+            "--metadata",
+            (
+                f"assignment-bucket={assignment_bucket},"
+                f"assignment-index={assignment_index}"
+            ),
+        ]
+    )
+
+    print("$", " ".join(command))
+
+    if dry_run:
+        return True
+
+    result = subprocess.run(
+        command,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+def create_vm_in_available_zone(
+    *,
+    vm_name: str,
+    compatible_zones: list[str],
+    starting_zone_index: int,
+    assignment_bucket: str,
+    assignment_index: str,
+    startup_script_path: Path,
+    project_id: str,
+    machine_type: str,
+    gpu: str,
+    size_gb: int,
+    image_family: str,
+    image_project: str,
+    dry_run: bool,
+) -> str:
+    ordered_zones = (
+        compatible_zones[starting_zone_index:]
+        + compatible_zones[:starting_zone_index]
+    )
+
+    for attempt, zone in enumerate(ordered_zones, start=1):
+        print(
+            f"\nAttempt {attempt}/{len(ordered_zones)}: "
+            f"creating {vm_name} in {zone}"
+        )
+
+        created = create_vm(
+            vm_name=vm_name,
+            zone=zone,
+            assignment_bucket=assignment_bucket,
+            assignment_index=assignment_index,
+            startup_script_path=startup_script_path,
+            project_id=project_id,
+            machine_type=machine_type,
+            gpu=gpu,
+            size_gb=size_gb,
+            image_family=image_family,
+            image_project=image_project,
+            dry_run=dry_run,
+        )
+
+        if created:
+            print(f"Created {vm_name} in {zone}")
+            return zone
+
+        print(
+            f"Creation failed in {zone}; trying the next compatible zone."
+        )
+
+    raise RuntimeError(
+        f"Could not create VM '{vm_name}' in any compatible zone "
+        f"within the selected region. Tried: {', '.join(ordered_zones)}"
+    )
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -552,6 +639,12 @@ def main() -> None:
 
     if not gpu:
         raise ValueError("'compute.gpu' must be filled in.")
+
+    if uses_integrated_gpu_machine(machine_type) and gpu != "nvidia-l4":
+        raise ValueError(
+            "G2 machine types include an NVIDIA L4 GPU. Set "
+            "'compute.gpu' to 'nvidia-l4'."
+        )
 
     if not region:
         raise ValueError("'compute.region' must be filled in.")
@@ -621,22 +714,23 @@ def main() -> None:
             dry_run=args.dry_run,
         )
 
-        zone = compatible_zones[
+        starting_zone_index = (
             (vm_index - 1) % len(compatible_zones)
-        ]
+        )
         vm_name = (
             f"{vm_name_prefix}-{run_id}-{assignment_index}"
         ).lower()[:63].rstrip("-")
 
         print(
-            f"\nCreating {vm_name} in {zone} "
-            f"with {len(jobs_for_vm)} jobs"
+            f"\nCreating {vm_name} with "
+            f"{len(jobs_for_vm)} jobs"
         )
         print(f"  Assignment: {assignment_uri}")
 
-        create_vm(
+        create_vm_in_available_zone(
             vm_name=vm_name,
-            zone=zone,
+            compatible_zones=compatible_zones,
+            starting_zone_index=starting_zone_index,
             assignment_bucket=assignment_bucket,
             assignment_index=assignment_index,
             startup_script_path=startup_script_path,
