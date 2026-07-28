@@ -1,61 +1,46 @@
 cloud:
-  project_id: your-google-cloud-project-id
-  bucket: your-results-bucket
+  project_id: your_project_id
+  bucket: your_bucket_id
 
 data:
-  repository: https://huggingface.co/datasets/your-username/your-dataset
-  token: your-hugging-face-access-token
+  repository: your_repository
+  token: your_token
 
-  kinematics: data/kinematics
+  kinematics: kinematics
 
   firing_rates:
 
   spikes:
-    folder_or_file: spikes
-    output_folder_or_file: firing_rates
-    num_steps: 50
-    step_dt: 0.0066666667
+    folder_or_file: 
+    output_folder_or_file: 
+    num_steps: 
+    step_dt: 
 
 compute:
-  region: us-central1
-  number_of_vms: 4
-  machine_type: n1-standard-8
+  region: us-west4
+  number_of_vms: 1
+  machine_type: n1-standard-4
   gpu: nvidia-tesla-t4
   size_gb: 100
 
 jobs:
   environment.model:
-    - value: muscle
-      parameters:
-          algorithm.learning_rate: 3.0e-05
-          algorithm.clip_range: 0.175
-          algorithm.clip_range_vf: 0.175
-          algorithm.max_grad_norm: 0.175
-          training.timesteps: 2000000
-
     - value: torque
       parameters:
           algorithm.learning_rate: 1.0e-05
-          algorithm.clip_range: 0.35
-          algorithm.clip_range_vf: 0.35
-          algorithm.max_grad_norm: 0.35
+          algorithm.clip_range: 0.15
+          algorithm.clip_range_vf: 0.15
+          algorithm.max_grad_norm: 0.15
           training.timesteps: 250000
 
   model.rnn_type:
     - ffn
-    - lstm
 
   model.rnn_hidden_size:
     - 256
-    - 512
-    - 768
 
   model.rnn_layers:
     - 1
-    - 2
-    - 3
 
   general.seed:
     - 1
-    - 2
-    - 3

@@ -51,6 +51,23 @@ gcloud storage cp \
     "gs://${ASSIGNMENT_BUCKET}/assignments/${ASSIGNMENT_INDEX}.json" \
     "$ASSIGNMENT_PATH"
 
-python cloud/cloud_worker.py "$ASSIGNMENT_PATH"
+WORKER_LOG="/var/log/mouse-arm-cloud-worker.log"
+
+echo "Starting cloud worker. Output: $WORKER_LOG"
+
+set +e
+python cloud/cloud_worker.py "$ASSIGNMENT_PATH" \
+    > "$WORKER_LOG" 2>&1
+WORKER_EXIT_CODE=$?
+set -e
+
+if [ "$WORKER_EXIT_CODE" -ne 0 ]; then
+    echo "Cloud worker failed with exit code $WORKER_EXIT_CODE"
+    echo "Last 100 lines of worker log:"
+    tail -n 100 "$WORKER_LOG"
+    exit "$WORKER_EXIT_CODE"
+fi
+
+echo "Cloud worker completed successfully"
 
 sudo shutdown -h now

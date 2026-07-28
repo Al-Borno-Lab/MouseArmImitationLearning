@@ -410,7 +410,7 @@ def run_job(
 
     print(f"=== {job_id}: train ===")
     run_command(
-        ["python", str(TRAINING_SCRIPT)],
+        ["python", str(TRAINING_SCRIPT), "--disable-progressbar"],
         dry_run=dry_run,
     )
 

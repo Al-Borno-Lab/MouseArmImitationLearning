@@ -10,6 +10,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from pathlib import Path
 from tqdm import tqdm
+import argparse
 
 import gymnasium as gym
 
@@ -32,6 +33,14 @@ import numpy as np
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--disable-progressbar",
+        action="store_true",
+        help="Disable the manual tqdm training progress bar.",
+    )
+    args = parser.parse_args()
+
     SCRIPT_DIR = Path(__file__).resolve().parent
     PROJECT_ROOT = SCRIPT_DIR.parent
 
@@ -565,6 +574,7 @@ if __name__ == "__main__":
             enumerate(range(start_timestep, end_timestep), start=1),
             total=run_timesteps,
             desc="Training",
+            disable=args.disable_progressbar,
         )
 
         # Save the model state before any training steps in this run.
