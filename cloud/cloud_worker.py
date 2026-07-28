@@ -7,6 +7,7 @@ import copy
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -144,12 +145,30 @@ def download_data(data_config: dict[str, Any], *, dry_run: bool) -> Path:
 
     if not dry_run:
         DATA_DIRECTORY.mkdir(parents=True, exist_ok=True)
-        subprocess.run(
-            command,
-            cwd=REPOSITORY_ROOT,
-            env=environment,
-            check=True,
-        )
+
+        max_attempts = 5
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                subprocess.run(
+                    command,
+                    cwd=REPOSITORY_ROOT,
+                    env=environment,
+                    check=True,
+                )
+                break
+            except subprocess.CalledProcessError:
+                if attempt == max_attempts:
+                    raise
+
+                wait_seconds = attempt * 30
+                print(
+                    f"Hugging Face download failed "
+                    f"(attempt {attempt}/{max_attempts}). "
+                    f"Retrying in {wait_seconds} seconds...",
+                    flush=True,
+                )
+                time.sleep(wait_seconds)
 
     return DATA_DIRECTORY
 
