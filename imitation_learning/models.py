@@ -297,12 +297,18 @@ class SharedModel(GaussianMixin, DeterministicMixin, Model):
             role="policy",
         )
         DeterministicMixin.__init__(self, clip_actions=False, role="value")
+
+        # Initial observation projection: input_dim -> hidden_dim
+        self.input_layer = nn.Sequential(
+            nn.Linear(self.num_observations, rnn_hidden_size),
+            nn.Tanh(),
+        )
         
         # shared layers (backbone)
         self.reccurent_layers: RecurrentLayers
         if rnn_type == ReccurentLayerType.RNN:
             self.reccurent_layers = RNN(
-                input_size=self.num_observations,
+                input_size=rnn_hidden_size,
                 hidden_size=rnn_hidden_size, 
                 num_layers=rnn_layers, 
                 sequence_length=sequence_length, 
@@ -310,7 +316,7 @@ class SharedModel(GaussianMixin, DeterministicMixin, Model):
             )
         elif rnn_type == ReccurentLayerType.GRU:
             self.reccurent_layers = GRU(
-                input_size=self.num_observations,
+                input_size=rnn_hidden_size,
                 hidden_size=rnn_hidden_size, 
                 num_layers=rnn_layers, 
                 sequence_length=sequence_length, 
@@ -318,7 +324,7 @@ class SharedModel(GaussianMixin, DeterministicMixin, Model):
             )
         elif rnn_type == ReccurentLayerType.LSTM:
             self.reccurent_layers = LSTM(
-                input_size=self.num_observations,
+                input_size=rnn_hidden_size,
                 hidden_size=rnn_hidden_size, 
                 num_layers=rnn_layers, 
                 sequence_length=sequence_length, 
@@ -326,7 +332,7 @@ class SharedModel(GaussianMixin, DeterministicMixin, Model):
             )
         elif rnn_type == ReccurentLayerType.NOT_RECURRENT:
             self.reccurent_layers = NotAReccurentLayer(
-                input_size=self.num_observations,
+                input_size=rnn_hidden_size,
                 hidden_size=rnn_hidden_size,  # FFN feature/output size
                 num_layers=rnn_layers,        # FFN layer count
                 sequence_length=sequence_length,
@@ -413,8 +419,14 @@ class SharedModel(GaussianMixin, DeterministicMixin, Model):
     # forward the input to compute model output according to the specified role
     def compute(self, inputs, role):
         if role == "policy":
+            # compute input layer
+            backbone_inputs = dict(inputs)
+            backbone_inputs["observations"] = self.input_layer(
+                inputs["observations"]
+            )
+
             # save shared layers/network output to perform a single forward-pass
-            self._shared_output, data = self.reccurent_layers.compute(inputs)
+            self._shared_output, data = self.reccurent_layers.compute(backbone_inputs)
             data["log_std"] = self.log_std_parameter
 
             raw_mean = self.mean_layer(self._shared_output)  # final tanh, range [-1, 1]
@@ -424,7 +436,11 @@ class SharedModel(GaussianMixin, DeterministicMixin, Model):
         elif role == "value":
             # use saved shared layers/network output to perform a single forward-pass, if it was saved
             if self._shared_output is None:
-                shared_output, data = self.reccurent_layers.compute(inputs)
+                backbone_inputs = dict(inputs)
+                backbone_inputs["observations"] = self.input_layer(
+                    inputs["observations"]
+                )
+                shared_output, data = self.reccurent_layers.compute(backbone_inputs)
             else:
                 shared_output = self._shared_output
             self._shared_output = (
@@ -434,6 +450,11 @@ class SharedModel(GaussianMixin, DeterministicMixin, Model):
 
     def init_head_weights(self):
         tanh_gain = nn.init.calculate_gain("tanh")
+
+        # Initial input projection
+        input_linear = self.input_layer[0]
+        nn.init.orthogonal_(input_linear.weight, gain=tanh_gain)
+        nn.init.constant_(input_linear.bias, 0.0)
 
         # Policy head
         policy_linear_layers = [

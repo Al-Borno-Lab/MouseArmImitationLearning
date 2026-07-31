@@ -18,6 +18,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 TRAINING_CONFIG_PATH = REPOSITORY_ROOT / "imitation_learning" / "config.yml"
 TRAINING_SCRIPT = REPOSITORY_ROOT / "imitation_learning" / "train_test_record.py"
 SCALING_SCRIPT = REPOSITORY_ROOT / "imitation_learning" / "scale_model.py"
+NEURAL_COMPARISON_SCRIPT = REPOSITORY_ROOT / "analysis" / "neural_comparison.py"
 
 MODELS_DIRECTORY = REPOSITORY_ROOT / "models"
 SOURCE_MUSCLE_MODEL = MODELS_DIRECTORY / "mujoco_model_muscle.xml"
@@ -242,9 +243,23 @@ def prepare_firing_rates(
     *,
     dry_run: bool,
 ) -> Path | None:
-    firing_rates = resolve_data_path(data_root, data_config.get("firing_rates"))
-    if firing_rates is not None:
-        return firing_rates
+    configured_firing_rates = resolve_data_path(
+        data_root,
+        data_config.get("firing_rates"),
+    )
+
+    if configured_firing_rates is not None:
+        if dry_run or configured_firing_rates.exists():
+            print(
+                f"Using existing firing rates: "
+                f"{configured_firing_rates}"
+            )
+            return configured_firing_rates
+
+        raise FileNotFoundError(
+            "Configured firing rates path does not exist: "
+            f"{configured_firing_rates}"
+        )
 
     spikes_config = data_config.get("spikes")
     if not isinstance(spikes_config, dict):
@@ -265,31 +280,49 @@ def prepare_firing_rates(
 
     if spike_output is None:
         raise ValueError(
-            "'data.spikes.output_folder_or_file' is required when spikes are used."
-        )
-
-    num_steps = spikes_config.get("num_steps")
-    step_dt = spikes_config.get("step_dt")
-
-    if num_steps is None or step_dt is None:
-        raise ValueError(
-            "'data.spikes.num_steps' and 'data.spikes.step_dt' are required "
+            "'data.spikes.output_folder_or_file' is required "
             "when spikes are used."
         )
 
-    run_command(
-        [
-            "python",
-            str(REPOSITORY_ROOT / "analysis" / "firing_rate_estimation.py"),
-            str(spike_input),
-            str(spike_output),
-            "--num-steps",
-            str(num_steps),
-            "--step-dt",
-            str(step_dt),
-        ],
-        dry_run=dry_run,
-    )
+    if not dry_run and not spike_input.exists():
+        raise FileNotFoundError(
+            f"Spike input path does not exist: {spike_input}"
+        )
+
+    if dry_run or not spike_output.exists():
+        num_steps = spikes_config.get("num_steps")
+        step_dt = spikes_config.get("step_dt")
+
+        if num_steps is None or step_dt is None:
+            raise ValueError(
+                "'data.spikes.num_steps' and 'data.spikes.step_dt' "
+                "are required when spikes are used."
+            )
+
+        print("Estimating firing rates from spike times.")
+
+        run_command(
+            [
+                "python",
+                str(
+                    REPOSITORY_ROOT
+                    / "analysis"
+                    / "firing_rate_estimation.py"
+                ),
+                str(spike_input),
+                str(spike_output),
+                "--num-steps",
+                str(num_steps),
+                "--step-dt",
+                str(step_dt),
+            ],
+            dry_run=dry_run,
+        )
+    else:
+        print(
+            f"Using previously estimated firing rates: "
+            f"{spike_output}"
+        )
 
     return spike_output
 
@@ -406,11 +439,40 @@ def upload_job(
     )
 
 
+
+def run_neural_comparison(
+    firing_rates: Path,
+    model_folder: Path,
+    *,
+    dry_run: bool,
+) -> None:
+    if not dry_run:
+        if not firing_rates.exists():
+            raise FileNotFoundError(
+                f"Firing rates path does not exist: {firing_rates}"
+            )
+
+        if not model_folder.is_dir():
+            raise FileNotFoundError(
+                f"Model folder does not exist: {model_folder}"
+            )
+
+    run_command(
+        [
+            "python",
+            str(NEURAL_COMPARISON_SCRIPT),
+            str(firing_rates),
+            str(model_folder),
+        ],
+        dry_run=dry_run,
+    )
+
 def run_job(
     base_config: dict[str, Any],
     job: dict[str, Any],
     kinematics_path: Path,
     bucket: str,
+    firing_rates: Path | None,
     *,
     dry_run: bool,
 ) -> None:
@@ -446,6 +508,19 @@ def run_job(
         ["python", str(TRAINING_SCRIPT)],
         dry_run=dry_run,
     )
+
+    if firing_rates is not None:
+        print(f"\n=== {job_id}: neural comparison ===")
+        run_neural_comparison(
+            firing_rates,
+            output_folder,
+            dry_run=dry_run,
+        )
+    else:
+        print(
+            f"\n=== {job_id}: neural comparison skipped "
+            "(no firing rates configured) ==="
+        )
 
     print(f"\n=== {job_id}: upload ===")
     upload_job(
@@ -521,6 +596,7 @@ def main() -> None:
             job,
             kinematics_path,
             bucket,
+            firing_rates,
             dry_run=args.dry_run,
         )
 

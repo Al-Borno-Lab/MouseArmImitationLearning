@@ -129,6 +129,21 @@ This project was created and tested on linux (specifically ubuntu), and while it
         --project="$PROJECT_ID"
     ~~~
 
+6. Check GPU Quota
+
+    - GPU-enabled VMs require sufficient GPU quota for the selected project. New projects may initially have a GPU quota of 0.
+
+    - Open the Google Cloud Quotas page:
+    https://console.cloud.google.com/iam-admin/quotas
+
+    - Make sure the correct project is selected, filter by the Compute Engine API, and search for GPU-related quotas.
+
+    - If the quota for the desired GPU is unavailable, set to 0, or less than the desired total amount of GPUs you wish to use, request a quota increase. 
+
+    - Make sure to also set the quota for GPUS_ALL_REGIONS which is independent of the actual desired GPU
+
+    - Make sure to also do this for CPUs
+&nbsp;
 6. Create a New Google Cloud Bucket for the Google Cloud Project (replace 'bucket_name')
     ~~~
     BUCKET="bucket_name"
@@ -247,12 +262,11 @@ This project was created and tested on linux (specifically ubuntu), and while it
         --step-dt 0.00598485
     ~~~
 
-2. Compare a Model's Hidden Activation's to Neural Activity (replace 'firing_rates_folder_or_file' and 'hidden_activations_folder_or_file', they must both be either a folder or a file, if using folders then the file names inside must match in order to actually perform the comparisons {they should by default if following all these instructions}; replace 'output_folder')
+2. Compare a Model's Hidden Activation's to Neural Activity (replace 'firing_rates_folder_or_file', it must be either a folder or a file, if using afolder then the file names inside must match the ones in the recordings of the model folder in order to actually perform the comparisons {they should be the same by default if following all these instructions}; replace 'model_folder')
     ~~~
     python analysis/neural_comparison.py \
         firing_rates_folder_or_file \
-        hidden_activations_folder_or_file \
-        output_folder
+        model_folder
     ~~~
 
 ---

@@ -6,6 +6,7 @@ import argparse
 import json
 from pathlib import Path
 from typing import Any
+import time
 
 import numpy as np
 from sklearn.linear_model import Ridge
@@ -14,11 +15,11 @@ from sklearn.model_selection import GroupKFold
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
-from analysis.comparisons.cca import cca, pwcca, svcca
-from analysis.comparisons.cka import linear_cka
-from analysis.comparisons.procrustes import procrustes
-from analysis.comparisons.ridge import cross_validated_ridge
-from analysis.comparisons.rsa import rsa
+from comparisons.cca import cca, pwcca, svcca
+from comparisons.cka import linear_cka
+from comparisons.procrustes import procrustes
+from comparisons.ridge import cross_validated_ridge
+from comparisons.rsa import rsa
 
 
 def load_json_matrix(path: str | Path, name: str) -> np.ndarray:
@@ -232,35 +233,6 @@ def json_safe(value: Any, decimals: int = 2) -> Any:
     return value
 
 
-def make_regularization_grid(
-    min_reg: float = 1e-8,
-    max_reg: float = 1e-2,
-    num_values: int = 7,
-) -> list[float]:
-    """Create an inclusive logarithmically spaced CCA regularization grid."""
-    if min_reg <= 0:
-        raise ValueError(f"min_reg must be positive, got {min_reg}")
-    if max_reg <= 0:
-        raise ValueError(f"max_reg must be positive, got {max_reg}")
-    if min_reg > max_reg:
-        raise ValueError(f"min_reg ({min_reg}) cannot exceed max_reg ({max_reg})")
-    if num_values < 1:
-        raise ValueError(f"num_values must be at least 1, got {num_values}")
-    if num_values == 1:
-        return [float(min_reg)]
-    return [
-        float(value)
-        for value in np.logspace(
-            np.log10(min_reg),
-            np.log10(max_reg),
-            num=num_values,
-        )
-    ]
-
-
-def format_reg_key(reg: float) -> str:
-    """Return a stable, readable dictionary key for a regularization value."""
-    return f"{reg:.6e}"
 
 
 def print_table(title: str, headers: list[str], rows: list[list[Any]]) -> None:
@@ -279,38 +251,6 @@ def print_table(title: str, headers: list[str], rows: list[list[Any]]) -> None:
 
     for row in formatted_rows:
         print(" | ".join(item.ljust(widths[i]) for i, item in enumerate(row)))
-
-
-def make_component_grid(max_components: int, min_components: int = 5, num_values: int = 20) -> list[int]:
-    """
-    Create up to ``num_values`` unique component counts spanning
-    ``min_components`` through ``max_components`` inclusively.
-
-    If the valid range contains fewer than ``num_values`` integers, every
-    integer in the range is returned.
-    """
-    if max_components < 1:
-        raise ValueError(f"max_components must be at least 1, got {max_components}")
-
-    start = min(min_components, max_components)
-
-    if max_components - start + 1 <= num_values:
-        return list(range(start, max_components + 1))
-
-    values = np.linspace(start, max_components, num=num_values)
-    grid = sorted({int(round(value)) for value in values})
-
-    # Rounding can occasionally produce fewer than num_values unique entries.
-    # Fill any gaps deterministically while preserving the requested endpoints.
-    if len(grid) < num_values:
-        for value in range(start, max_components + 1):
-            if value not in grid:
-                grid.append(value)
-                if len(grid) == num_values:
-                    break
-        grid.sort()
-
-    return grid
 
 
 
@@ -571,51 +511,27 @@ def leave_one_reach_out_ridge(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Compare firing rates and DNN activations using CCA-family, CKA, RSA, Procrustes, and ridge metrics.")
-    parser.add_argument("firing_rates_input", help="Firing-rate JSON file or folder of JSON files")
-    parser.add_argument("activations_input", help="Activation JSON file or folder of JSON files")
-    parser.add_argument("output_dir", help="Directory for the results JSON file")
     parser.add_argument(
-        "--output-filename",
-        default="neural_comparison_results.json",
+        "firing_rates_input",
+        help="Firing-rate JSON file or folder of JSON files",
+    )
+    parser.add_argument(
+        "model_folder",
         help=(
-            "Optional output JSON filename. "
-            "Defaults to neural_comparison_results.json"
+            "Model folder containing recordings/<checkpoint>/hidden_states/"
+            "{train,test}"
         ),
     )
 
     cca_group = parser.add_argument_group("CCA / SVCCA / PWCCA")
     cca_group.add_argument(
-        "--reg-min",
-        type=float,
-        default=1e-8,
-        help="Smallest CCA-family regularization value in the logarithmic sweep.",
-    )
-    cca_group.add_argument(
-        "--reg-max",
+        "--cca-reg",
         type=float,
         default=1e-2,
-        help="Largest CCA-family regularization value in the logarithmic sweep.",
-    )
-    cca_group.add_argument(
-        "--reg-runs",
-        type=int,
-        default=7,
-        help="Number of logarithmically spaced regularization values.",
+        help="Regularization used for CCA, SVCCA, and PWCCA.",
     )
     cca_group.add_argument("--svcca-variance", type=float, default=0.90)
     cca_group.add_argument("--pwcca-weight-side", choices=["x", "y"], default="x")
-    cca_group.add_argument(
-        "--component-min",
-        type=int,
-        default=5,
-        help="Smallest component count included in the automatic sweep.",
-    )
-    cca_group.add_argument(
-        "--component-runs",
-        type=int,
-        default=20,
-        help="Maximum number of evenly spaced component counts to evaluate.",
-    )
 
     cka_group = parser.add_argument_group("CKA")
     cka_group.add_argument("--cka-debiased", action="store_true")
@@ -722,57 +638,36 @@ def run_analysis(
     activations: np.ndarray,
     input_metadata: dict[str, Any],
     args: argparse.Namespace,
-    component_grid: list[int],
-    regularization_grid: list[float],
+    n_components: int,
 ) -> dict[str, Any]:
-    """Run all metrics once on the supplied matrices."""
-    cca_results = {}
-    svcca_results = {}
-    pwcca_results = {}
-    procrustes_results = {}
-
-    for reg in regularization_grid:
-        reg_key = format_reg_key(reg)
-        cca_results[reg_key] = {}
-        svcca_results[reg_key] = {}
-        pwcca_results[reg_key] = {}
-
-        for n_components in component_grid:
-            component_key = str(n_components)
-
-            cca_results[reg_key][component_key] = cca(
-                firing_rates,
-                activations,
-                reg=reg,
-                max_components=n_components,
-            )
-
-            svcca_results[reg_key][component_key] = svcca(
-                firing_rates,
-                activations,
-                variance_threshold=args.svcca_variance,
-                max_pca_components=n_components,
-                max_cca_components=n_components,
-                reg=reg,
-            )
-
-            pwcca_results[reg_key][component_key] = pwcca(
-                firing_rates,
-                activations,
-                reg=reg,
-                max_components=n_components,
-                weight_side=args.pwcca_weight_side,
-            )
-
-    for n_components in component_grid:
-        component_key = str(n_components)
-        procrustes_results[component_key] = procrustes(
-            firing_rates,
-            activations,
-            n_components=n_components,
-            allow_scaling=not args.no_procrustes_scaling,
-        )
-
+    """Run each comparison metric once using the maximum valid components."""
+    cca_result = cca(
+        firing_rates,
+        activations,
+        reg=args.cca_reg,
+        max_components=n_components,
+    )
+    svcca_result = svcca(
+        firing_rates,
+        activations,
+        variance_threshold=args.svcca_variance,
+        max_pca_components=n_components,
+        max_cca_components=n_components,
+        reg=args.cca_reg,
+    )
+    pwcca_result = pwcca(
+        firing_rates,
+        activations,
+        reg=args.cca_reg,
+        max_components=n_components,
+        weight_side=args.pwcca_weight_side,
+    )
+    procrustes_result = procrustes(
+        firing_rates,
+        activations,
+        n_components=n_components,
+        allow_scaling=not args.no_procrustes_scaling,
+    )
     cka_result = linear_cka(
         firing_rates,
         activations,
@@ -805,51 +700,7 @@ def run_analysis(
             random_state=args.ridge_random_state,
             standardize=not args.no_ridge_standardize,
         )
-        ridge_result = {
-            "method": "time_split_cross_validation",
-            **ridge_result,
-        }
-
-    compact_cca = {
-        reg_key: {
-            component_key: result["mean_correlation"]
-            for component_key, result in component_results.items()
-        }
-        for reg_key, component_results in cca_results.items()
-    }
-
-    compact_svcca = {
-        reg_key: {
-            component_key: {
-                "score": result["svcca_score"],
-                **(
-                    {"x_pca_components": result["x_pca_components"]}
-                    if "x_pca_components" in result
-                    else {}
-                ),
-                **(
-                    {"y_pca_components": result["y_pca_components"]}
-                    if "y_pca_components" in result
-                    else {}
-                ),
-            }
-            for component_key, result in component_results.items()
-        }
-        for reg_key, component_results in svcca_results.items()
-    }
-
-    compact_pwcca = {
-        reg_key: {
-            component_key: result["pwcca_score"]
-            for component_key, result in component_results.items()
-        }
-        for reg_key, component_results in pwcca_results.items()
-    }
-
-    compact_procrustes = {
-        component_key: result["procrustes_similarity"]
-        for component_key, result in procrustes_results.items()
-    }
+        ridge_result = {"method": "time_split_cross_validation", **ridge_result}
 
     compact_ridge = (
         {
@@ -858,15 +709,11 @@ def run_analysis(
             "inner_folds": ridge_result["inner_folds"],
             "alpha_grid": ridge_result["alpha_grid"],
             "number_of_reaches": ridge_result["number_of_reaches"],
-            "median_selected_alpha": ridge_result[
-                "median_selected_alpha"
-            ],
+            "median_selected_alpha": ridge_result["median_selected_alpha"],
             "mean_r2": ridge_result["mean_r2"],
             "median_r2": ridge_result["median_r2"],
             "mean_correlation": ridge_result["mean_correlation"],
-            "median_correlation": ridge_result[
-                "median_correlation"
-            ],
+            "median_correlation": ridge_result["median_correlation"],
             "per_reach": ridge_result["per_reach"],
         }
         if ridge_result["method"] == "nested_leave_one_reach_out"
@@ -879,31 +726,32 @@ def run_analysis(
 
     return {
         "metrics": {
-            "cca_mean_correlation": compact_cca,
-            "svcca": compact_svcca,
-            "pwcca_score": compact_pwcca,
-            "procrustes_similarity": compact_procrustes,
+            "cca_mean_correlation": cca_result["mean_correlation"],
+            "svcca_score": svcca_result["svcca_score"],
+            "svcca_x_pca_components": svcca_result.get("x_pca_components"),
+            "svcca_y_pca_components": svcca_result.get("y_pca_components"),
+            "pwcca_score": pwcca_result["pwcca_score"],
+            "procrustes_similarity": procrustes_result["procrustes_similarity"],
             "cka_score": cka_result["cka_score"],
             "rsa_score": rsa_result["rsa_score"],
             "ridge": compact_ridge,
         },
         "_print_data": {
-            "cca_results": cca_results,
-            "svcca_results": svcca_results,
-            "pwcca_results": pwcca_results,
-            "procrustes_results": procrustes_results,
+            "cca_result": cca_result,
+            "svcca_result": svcca_result,
+            "pwcca_result": pwcca_result,
+            "procrustes_result": procrustes_result,
             "cka_result": cka_result,
             "rsa_result": rsa_result,
             "ridge_result": ridge_result,
         },
     }
 
-
 def print_analysis(
     title: str,
     analysis: dict[str, Any],
-    component_grid: list[int],
-    regularization_grid: list[float],
+    n_components: int,
+    cca_reg: float,
 ) -> None:
     print()
     print("=" * len(title))
@@ -911,89 +759,41 @@ def print_analysis(
     print("=" * len(title))
 
     print_data = analysis["_print_data"]
-    cca_results = print_data["cca_results"]
-    svcca_results = print_data["svcca_results"]
-    pwcca_results = print_data["pwcca_results"]
-    procrustes_results = print_data["procrustes_results"]
+    cca_result = print_data["cca_result"]
+    svcca_result = print_data["svcca_result"]
+    pwcca_result = print_data["pwcca_result"]
+    procrustes_result = print_data["procrustes_result"]
     cka_result = print_data["cka_result"]
     rsa_result = print_data["rsa_result"]
     ridge_result = print_data["ridge_result"]
 
-    component_headers = ["Regularization"] + [
-        str(n_components) for n_components in component_grid
-    ]
-
-    cca_rows = []
-    svcca_rows = []
-    pwcca_rows = []
-
-    for reg in regularization_grid:
-        reg_key = format_reg_key(reg)
-
-        cca_rows.append(
-            [reg_key]
-            + [
-                f"{cca_results[reg_key][str(n_components)]['mean_correlation']:.2f}"
-                for n_components in component_grid
-            ]
-        )
-        svcca_rows.append(
-            [reg_key]
-            + [
-                f"{svcca_results[reg_key][str(n_components)]['svcca_score']:.2f}"
-                for n_components in component_grid
-            ]
-        )
-        pwcca_rows.append(
-            [reg_key]
-            + [
-                f"{pwcca_results[reg_key][str(n_components)]['pwcca_score']:.2f}"
-                for n_components in component_grid
-            ]
-        )
-
-    print_table("CCA sweep", component_headers, cca_rows)
-    print_table("SVCCA sweep", component_headers, svcca_rows)
-    print_table("PWCCA sweep", component_headers, pwcca_rows)
-
     print_table(
-        title="Procrustes component sweep",
-        headers=["Components", "Procrustes"],
-        rows=[
-            [
-                n_components,
-                f"{procrustes_results[str(n_components)]['procrustes_similarity']:.2f}",
-            ]
-            for n_components in component_grid
-        ],
-    )
-
-    print_table(
-        title="Metrics without component/regularization sweeps",
+        title="Comparison metrics",
         headers=["Metric", "Score"],
         rows=[
+            ["CCA", f"{cca_result['mean_correlation']:.2f}"],
+            ["SVCCA", f"{svcca_result['svcca_score']:.2f}"],
+            ["PWCCA", f"{pwcca_result['pwcca_score']:.2f}"],
+            ["Procrustes", f"{procrustes_result['procrustes_similarity']:.2f}"],
             ["CKA", f"{cka_result['cka_score']:.2f}"],
             ["RSA", f"{rsa_result['rsa_score']:.2f}"],
             [
-                (
-                    "Nested LORO ridge mean R2"
-                    if ridge_result["method"]
-                    == "nested_leave_one_reach_out"
-                    else "Ridge mean R2"
-                ),
+                "Nested LORO ridge mean R2"
+                if ridge_result["method"] == "nested_leave_one_reach_out"
+                else "Ridge mean R2",
                 f"{ridge_result['mean_r2']:.2f}",
             ],
             [
-                (
-                    "Nested LORO ridge mean correlation"
-                    if ridge_result["method"]
-                    == "nested_leave_one_reach_out"
-                    else "Ridge mean correlation"
-                ),
+                "Nested LORO ridge mean correlation"
+                if ridge_result["method"] == "nested_leave_one_reach_out"
+                else "Ridge mean correlation",
                 f"{ridge_result['mean_correlation']:.2f}",
             ],
         ],
     )
+
+    print(f"Components used: {n_components}")
+    print(f"CCA-family regularization: {cca_reg:.6e}")
 
     if ridge_result["method"] == "nested_leave_one_reach_out":
         print_table(
@@ -1011,11 +811,38 @@ def print_analysis(
         )
 
 
-def main() -> None:
-    args = build_parser().parse_args()
+def find_recording_jobs(model_folder: str | Path) -> list[tuple[str, str, Path, Path]]:
+    model_folder = Path(model_folder)
+    recordings_dir = model_folder / "recordings"
+    if not recordings_dir.is_dir():
+        raise FileNotFoundError(f"Recordings folder not found: {recordings_dir}")
+
+    jobs: list[tuple[str, str, Path, Path]] = []
+    for checkpoint_dir in sorted(path for path in recordings_dir.iterdir() if path.is_dir()):
+        checkpoint_name = checkpoint_dir.name
+        for split in ("train", "test"):
+            activations_dir = checkpoint_dir / "hidden_states" / split
+            if not activations_dir.is_dir() or not find_json_files(activations_dir):
+                continue
+            output_path = model_folder / "results" / checkpoint_name / f"{split}.json"
+            jobs.append((checkpoint_name, split, activations_dir, output_path))
+
+    if not jobs:
+        raise ValueError(f"No activation folders were found under: {recordings_dir}")
+    return jobs
+
+
+def run_recording_job(
+    firing_rates_input: Path,
+    activations_input: Path,
+    output_path: Path,
+    checkpoint_name: str,
+    split: str,
+    args: argparse.Namespace,
+) -> None:
     firing_rates, activations, input_metadata = load_input_pair(
-        args.firing_rates_input,
-        args.activations_input,
+        firing_rates_input,
+        activations_input,
     )
 
     max_valid_components = min(
@@ -1023,36 +850,16 @@ def main() -> None:
         activations.shape[0],
         firing_rates.shape[1] - 1,
     )
-
-    if args.component_min < 1:
-        raise ValueError(
-            f"--component-min must be at least 1, got {args.component_min}"
-        )
-    if args.component_runs < 1:
-        raise ValueError(
-            f"--component-runs must be at least 1, got {args.component_runs}"
-        )
-
-    component_grid = make_component_grid(
-        max_valid_components,
-        min_components=args.component_min,
-        num_values=args.component_runs,
-    )
-    regularization_grid = make_regularization_grid(
-        min_reg=args.reg_min,
-        max_reg=args.reg_max,
-        num_values=args.reg_runs,
-    )
+    if max_valid_components < 1:
+        raise ValueError(f"No valid components for {checkpoint_name}/{split}")
 
     analyses: dict[str, dict[str, Any]] = {}
-
     analyses["raw"] = run_analysis(
-        firing_rates=firing_rates,
-        activations=activations,
-        input_metadata=input_metadata,
-        args=args,
-        component_grid=component_grid,
-        regularization_grid=regularization_grid,
+        firing_rates,
+        activations,
+        input_metadata,
+        args,
+        max_valid_components,
     )
 
     if input_metadata["mode"] == "folder":
@@ -1064,20 +871,20 @@ def main() -> None:
             activations,
             input_metadata["matched_files"],
         )
-
         analyses["per_reach_centered"] = run_analysis(
-            firing_rates=centered_firing_rates,
-            activations=centered_activations,
-            input_metadata=input_metadata,
-            args=args,
-            component_grid=component_grid,
-            regularization_grid=regularization_grid,
+            centered_firing_rates,
+            centered_activations,
+            input_metadata,
+            args,
+            max_valid_components,
         )
 
     output = {
+        "checkpoint": checkpoint_name,
+        "split": split,
         "inputs": {
-            "firing_rates_input": str(Path(args.firing_rates_input)),
-            "activations_input": str(Path(args.activations_input)),
+            "firing_rates_input": str(firing_rates_input),
+            "activations_input": str(activations_input),
             **input_metadata,
         },
         "shapes": {
@@ -1085,89 +892,69 @@ def main() -> None:
             "activations": list(activations.shape),
         },
         "settings": {
-            **{
-                key: value
-                for key, value in vars(args).items()
-                if key not in {"reg_min", "reg_max"}
-            },
-            "component_sweep": {
-                "minimum_requested_components": args.component_min,
-                "number_of_requested_values": args.component_runs,
-                "maximum_valid_components": max_valid_components,
-                "component_grid": component_grid,
-            },
-            "regularization_sweep": {
-                "minimum_regularization": format_reg_key(args.reg_min),
-                "maximum_regularization": format_reg_key(args.reg_max),
-                "number_of_requested_values": args.reg_runs,
-                "regularization_grid": [
-                    format_reg_key(reg) for reg in regularization_grid
-                ],
-            },
+            **vars(args),
+            "maximum_valid_components": max_valid_components,
+            "components_used": max_valid_components,
+            "cca_regularization": args.cca_reg,
             "analysis_conditions": list(analyses.keys()),
-            "per_reach_centering": {
-                "enabled_for_folder_mode": True,
-                "operation": (
-                    "For each matched reach and each feature independently, "
-                    "subtract the temporal mean of that reach."
-                ),
-            },
         },
         "analyses": {
             condition: {
-                "preprocessing": (
-                    "none"
-                    if condition == "raw"
-                    else "per_reach_feature_centering"
-                ),
+                "preprocessing": "none" if condition == "raw" else "per_reach_feature_centering",
                 **analysis["metrics"],
             }
             for condition, analysis in analyses.items()
         },
     }
 
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    output_filename = Path(args.output_filename)
-    if output_filename.name != args.output_filename:
-        raise ValueError(
-            "--output-filename must be a filename only, not a path: "
-            f"{args.output_filename}"
-        )
-    if output_filename.suffix.lower() != ".json":
-        raise ValueError(
-            "--output-filename must end with .json, got: "
-            f"{args.output_filename}"
-        )
-
-    output_path = output_dir / output_filename
-
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as file:
         json.dump(json_safe(output, decimals=2), file, indent=2)
 
-    print(f"Saved all comparison results to: {output_path}")
-    print(f"Input mode:          {input_metadata['mode']}")
-    print(f"Matched files:       {input_metadata['matched_file_count']}")
-    print(f"Firing rates shape:  {firing_rates.shape}")
-    print(f"Activations shape:   {activations.shape}")
-    print(f"SVCCA variance threshold: {args.svcca_variance:.2f}")
-
+    print(f"Saved comparison results to: {output_path}")
     print_analysis(
-        title="RAW ANALYSIS",
+        title=f"{checkpoint_name.upper()} / {split.upper()} / RAW",
         analysis=analyses["raw"],
-        component_grid=component_grid,
-        regularization_grid=regularization_grid,
+        n_components=max_valid_components,
+        cca_reg=args.cca_reg,
     )
-
     if "per_reach_centered" in analyses:
         print_analysis(
-            title="PER-REACH CENTERED ANALYSIS",
+            title=f"{checkpoint_name.upper()} / {split.upper()} / PER-REACH CENTERED",
             analysis=analyses["per_reach_centered"],
-            component_grid=component_grid,
-            regularization_grid=regularization_grid,
+            n_components=max_valid_components,
+            cca_reg=args.cca_reg,
         )
 
+
+def main() -> None:
+    total_start_time = time.perf_counter()
+
+    args = build_parser().parse_args()
+    firing_rates_input = Path(args.firing_rates_input)
+    model_folder = Path(args.model_folder)
+    jobs = find_recording_jobs(model_folder)
+
+    print(f"Found {len(jobs)} comparison jobs under {model_folder / 'recordings'}")
+    for checkpoint_name, split, activations_input, output_path in jobs:
+        run_recording_job(
+            firing_rates_input,
+            activations_input,
+            output_path,
+            checkpoint_name,
+            split,
+            args,
+        )
+
+    total_elapsed = time.perf_counter() - total_start_time
+
+    hours, remainder = divmod(total_elapsed, 3600)
+    minutes, seconds = divmod(remainder, 60)
+
+    print(
+        f"\nTotal runtime: "
+        f"{int(hours):02d}:{int(minutes):02d}:{seconds:05.2f}"
+    )
 
 if __name__ == "__main__":
     main()

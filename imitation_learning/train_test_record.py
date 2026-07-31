@@ -30,9 +30,12 @@ from models import SharedModel, ReccurentLayerType
 import torch
 import random
 import numpy as np
+import time
 
 
 if __name__ == "__main__":
+    total_start_time = time.perf_counter()
+
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--disable-progressbar",
@@ -249,12 +252,14 @@ if __name__ == "__main__":
     newest_checkpoint_path = checkpoint_dir / "newest_agent.pt"
     best_checkpoint_path = checkpoint_dir / "best_agent.pt"
 
-    if mode in ("test", "record"):
+    if mode == "test":
         checkpoint_path = best_checkpoint_path
-    else:
+    elif mode == "train":
         checkpoint_path = newest_checkpoint_path
+    else:
+        checkpoint_path = None
 
-    if not is_new_agent:
+    if not is_new_agent and checkpoint_path is not None:
         if not checkpoint_path.is_file():
             raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
 
@@ -748,129 +753,168 @@ if __name__ == "__main__":
                 indent=4,
             )
 
+        percentage_checkpoint_paths = sorted(
+            checkpoint_dir.glob("percent_*_agent.pt")
+        )
+
+        checkpoint_targets = [
+            (
+                checkpoint_path.stem.removeprefix("percent_").removesuffix("_agent"),
+                checkpoint_path,
+            )
+            for checkpoint_path in percentage_checkpoint_paths
+        ]
+
+        if best_checkpoint_path.is_file():
+            checkpoint_targets.append(("best", best_checkpoint_path))
+
+        if len(checkpoint_targets) == 0:
+            raise FileNotFoundError(
+                f"No percentage checkpoints or best checkpoint found in: "
+                f"{checkpoint_dir}"
+            )
+
         print(f"Saved recording file split to {recording_files_path}")
-        print("Record mode. Running without visualization or slowmo; press Ctrl+C to quit.")
+        print(
+            f"Record mode. Recording {len(checkpoint_targets)} checkpoints "
+            f"without visualization or slowmo; press Ctrl+C to quit."
+        )
 
         try:
             num_record_episodes = len(all_files)
 
-            for _ in range(num_record_episodes):
-                raw_env = get_raw_env(env)
-
-                current_file = Path(
-                    raw_env.kinematic_files[raw_env.kinematics_index]
-                ).expanduser().resolve()
-
-                current_file_stem = current_file.stem
-
-                if current_file in train_file_set:
-                    recording_split = "train"
-                elif current_file in test_file_set:
-                    recording_split = "test"
-                else:
-                    raise ValueError(
-                        f"Current recording file is not in the train or test split: "
-                        f"{current_file}"
-                    )
-
-                # Clear stale stats before this episode starts
-                pop_reward_stats_from_env(env)
-
-                models["policy"].reccurent_layers.start_recording()
-
-                episode_reward_stats_rows = []
-                episode_step = 0
-                timestep = 0
-                while episode_step < eval_timesteps:
-                    _, _, terminated, truncated, _ = trainer.eval(
-                        timestep=timestep,
-                        timesteps=eval_timesteps,
-                    )
-
-                    stats = pop_reward_stats_from_env(env)
-
-                    is_terminated = bool(terminated.any())
-                    is_truncated = bool(truncated.any())
-                    done = is_terminated or is_truncated
-
-                    if int(stats.get("_count", 0)) > 0:
-                        row = {
-                            "episode_step": episode_step,
-                        }
-
-                        for key, value in stats.items():
-                            if key == "_count":
-                                continue
-                            row[key] = float(value)
-
-                        episode_reward_stats_rows.append(row)
-
-                    timestep += 1
-                    episode_step += 1
-
-                    if done:
-                        break
-
-                hidden_states = models["policy"].reccurent_layers.get_recorded_hidden_states()
-                # Expected shape: [T, E, N]
-                # T = timesteps
-                # E = environments
-                # N = neurons
-
-                if hidden_states.ndim != 3:
-                    raise ValueError(
-                        f"Expected hidden_states shape [T, E, N], got {hidden_states.shape}"
-                    )
-
-                if hidden_states.shape[1] != 1:
-                    raise ValueError(
-                        f"Expected env dim E == 1, got hidden_states shape {hidden_states.shape}"
-                    )
-
-                # [T, E, N] -> [T, N]
-                hidden_states = hidden_states.squeeze(dim=1)
-
-                # [T, N] -> [N, T]
-                hidden_states = hidden_states.transpose(0, 1)
-
-                # Save hidden states as JSON list of lists: [N][T]
-                hidden_states_path = (
-                    full_model_path
-                    / "recordings"
-                    / "hidden_states"
-                    / recording_split
-                    / f"{current_file_stem}.json"
+            for checkpoint_name, checkpoint_path in checkpoint_targets:
+                print(
+                    f"\nLoading checkpoint for recording: "
+                    f"{checkpoint_name} ({checkpoint_path})"
                 )
-                hidden_states_path.parent.mkdir(parents=True, exist_ok=True)
+                agent.load(str(checkpoint_path))
+                reset_ppo_rnn_states(agent)
 
-                with open(hidden_states_path, "w") as f:
-                    json.dump(hidden_states.detach().cpu().tolist(), f)
+                checkpoint_recordings_dir = recordings_dir / checkpoint_name
 
-                print(f"Saved hidden states to {hidden_states_path}")
+                for _ in range(num_record_episodes):
+                    raw_env = get_raw_env(env)
 
-                # Save reward details as CSV, one row per eval timestep
-                reward_details_path = (
-                    full_model_path
-                    / "recordings"
-                    / "reward_details"
-                    / recording_split
-                    / f"{current_file_stem}.csv"
-                )
-                reward_details_path.parent.mkdir(parents=True, exist_ok=True)
+                    current_file = Path(
+                        raw_env.kinematic_files[raw_env.kinematics_index]
+                    ).expanduser().resolve()
 
-                if len(episode_reward_stats_rows) > 0:
-                    fieldnames = list(episode_reward_stats_rows[0].keys())
+                    current_file_stem = current_file.stem
 
-                    with open(reward_details_path, "w", newline="") as f:
-                        writer = csv.DictWriter(f, fieldnames=fieldnames)
-                        writer.writeheader()
-                        writer.writerows(episode_reward_stats_rows)
+                    if current_file in train_file_set:
+                        recording_split = "train"
+                    elif current_file in test_file_set:
+                        recording_split = "test"
+                    else:
+                        raise ValueError(
+                            f"Current recording file is not in the train or test split: "
+                            f"{current_file}"
+                        )
 
-                    #print(f"Saved reward details to {reward_details_path}")
-                else:
-                    print(f"No reward details recorded for episode {current_file_stem}")
+                    reset_ppo_rnn_states(agent)
+                    pop_reward_stats_from_env(env)
 
-                models["policy"].reccurent_layers.stop_recording()
+                    models["policy"].reccurent_layers.start_recording()
+
+                    episode_reward_stats_rows = []
+                    episode_step = 0
+                    timestep = 0
+
+                    while episode_step < eval_timesteps:
+                        _, _, terminated, truncated, _ = trainer.eval(
+                            timestep=timestep,
+                            timesteps=eval_timesteps,
+                        )
+
+                        stats = pop_reward_stats_from_env(env)
+
+                        is_terminated = bool(terminated.any())
+                        is_truncated = bool(truncated.any())
+                        done = is_terminated or is_truncated
+
+                        if int(stats.get("_count", 0)) > 0:
+                            row = {
+                                "episode_step": episode_step,
+                            }
+
+                            for key, value in stats.items():
+                                if key == "_count":
+                                    continue
+                                row[key] = float(value)
+
+                            episode_reward_stats_rows.append(row)
+
+                        timestep += 1
+                        episode_step += 1
+
+                        if done:
+                            break
+
+                    hidden_states = (
+                        models["policy"]
+                        .reccurent_layers
+                        .get_recorded_hidden_states()
+                    )
+
+                    if hidden_states.ndim != 3:
+                        raise ValueError(
+                            f"Expected hidden_states shape [T, E, N], "
+                            f"got {hidden_states.shape}"
+                        )
+
+                    if hidden_states.shape[1] != 1:
+                        raise ValueError(
+                            f"Expected env dim E == 1, "
+                            f"got hidden_states shape {hidden_states.shape}"
+                        )
+
+                    hidden_states = hidden_states.squeeze(dim=1)
+                    hidden_states = hidden_states.transpose(0, 1)
+
+                    hidden_states_path = (
+                        checkpoint_recordings_dir
+                        / "hidden_states"
+                        / recording_split
+                        / f"{current_file_stem}.json"
+                    )
+                    hidden_states_path.parent.mkdir(parents=True, exist_ok=True)
+
+                    with open(hidden_states_path, "w") as f:
+                        json.dump(hidden_states.detach().cpu().tolist(), f)
+
+                    print(f"Saved hidden states to {hidden_states_path}")
+
+                    reward_details_path = (
+                        checkpoint_recordings_dir
+                        / "reward_details"
+                        / recording_split
+                        / f"{current_file_stem}.csv"
+                    )
+                    reward_details_path.parent.mkdir(parents=True, exist_ok=True)
+
+                    if len(episode_reward_stats_rows) > 0:
+                        fieldnames = list(episode_reward_stats_rows[0].keys())
+
+                        with open(reward_details_path, "w", newline="") as f:
+                            writer = csv.DictWriter(f, fieldnames=fieldnames)
+                            writer.writeheader()
+                            writer.writerows(episode_reward_stats_rows)
+                    else:
+                        print(
+                            f"No reward details recorded for episode "
+                            f"{current_file_stem}"
+                        )
+
+                    models["policy"].reccurent_layers.stop_recording()
 
         except KeyboardInterrupt:
             print("Record stopped.")
+            
+    total_elapsed = time.perf_counter() - total_start_time
+    hours, remainder = divmod(total_elapsed, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    print(
+            f"\nTotal runtime: "
+            f"{int(hours):02d}:{int(minutes):02d}:{seconds:05.2f}"
+        )
